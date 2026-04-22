@@ -1,0 +1,10 @@
+# MuJoCo hard-stop zero-offset calibration (radians).
+# model=CASBOT02_ENCOS_7dof_shell_20251015_P1L_guitar.xml arm=right
+
+right_elbow_pitch_joint: -0.00037905051462393946
+right_shoulder_pitch_joint: 0.00024764553586997806
+right_shoulder_roll_joint: -0.1686856744294909
+right_shoulder_yaw_joint: 0.0003445439315592491
+right_wrist_pitch_joint: -0.00015593532534263765
+right_wrist_roll_joint: -7.479504690333094e-05
+right_wrist_yaw_joint: -0.00011822383032722428
