@@ -1,10 +1,17 @@
 # MuJoCo hard-stop zero-offset calibration (radians).
-# model=CASBOT02_ENCOS_7dof_shell_20251015_P1L_guitar.xml arm=right
+# model=CASBOT02_ENCOS_7dof_shell_20251015_P1L_bass.xml arm=both
 
-right_elbow_pitch_joint: -0.00037905051462393946
-right_shoulder_pitch_joint: 0.00024764553586997806
-right_shoulder_roll_joint: -0.1686856744294909
-right_shoulder_yaw_joint: 0.0003445439315592491
-right_wrist_pitch_joint: -0.00015593532534263765
-right_wrist_roll_joint: -7.479504690333094e-05
-right_wrist_yaw_joint: -0.00011822383032722428
+left_elbow_pitch_joint: -0.0018352179080284821
+left_shoulder_pitch_joint: 0.001348135811167328
+left_shoulder_roll_joint: -0.029613793049439563
+left_shoulder_yaw_joint: -0.001797331871682406
+left_wrist_pitch_joint: 0.0016882701226448305
+left_wrist_roll_joint: 0.0016982651753389977
+left_wrist_yaw_joint: -0.0015780588352383162
+right_elbow_pitch_joint: -0.0017783311672283932
+right_shoulder_pitch_joint: 0.0012694313844421323
+right_shoulder_roll_joint: 0.02962604778321737
+right_shoulder_yaw_joint: 0.0018967853122848766
+right_wrist_pitch_joint: 0.0016180596664341351
+right_wrist_roll_joint: -0.0016699733503970915
+right_wrist_yaw_joint: 0.0015697936844087934

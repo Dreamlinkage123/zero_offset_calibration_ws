@@ -29,14 +29,18 @@ class CalibrationPlanTests(unittest.TestCase):
         self.assertEqual(len(right_plan.steps), 7)
 
     def test_side_specific_roll_stop_selection(self) -> None:
+        # shoulder_roll 选"贴身"窄端（±0.3491 rad 一侧），避免仿真中手臂经过
+        # 躯干/头部碰撞体。详见 hard_stop_calibration.preferred_stop_side 注释。
         left_plan = build_default_arm_calibration_plan(URDF_PATH, "left")
         right_plan = build_default_arm_calibration_plan(URDF_PATH, "right")
 
         left_roll = next(step for step in left_plan.steps if step.target_joint == "left_shoulder_roll_joint")
         right_roll = next(step for step in right_plan.steps if step.target_joint == "right_shoulder_roll_joint")
 
-        self.assertEqual(left_roll.stop_side, "upper")
-        self.assertEqual(right_roll.stop_side, "lower")
+        self.assertEqual(left_roll.stop_side, "lower")
+        self.assertAlmostEqual(left_roll.stop_angle, -0.3491, places=4)
+        self.assertEqual(right_roll.stop_side, "upper")
+        self.assertAlmostEqual(right_roll.stop_angle, 0.3491, places=4)
 
     def test_search_direction_sign_matches_search_velocity(self) -> None:
         plan = build_default_arm_calibration_plan(URDF_PATH, "right")

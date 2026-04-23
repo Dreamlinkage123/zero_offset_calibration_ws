@@ -255,19 +255,31 @@ def arm_joint_names(arm: str) -> tuple[str, ...]:
     raise ValueError(f"Unsupported arm: {arm}")
 
 
-def preferred_stop_side(arm: str, joint_name: str) -> int:
-    """Return -1 for lower stop, +1 for upper stop."""
+def preferred_stop_side(arm: str, joint_name: str, instrument: str = "") -> int:
+    """Return -1 for lower stop, +1 for upper stop.
+
+    shoulder_roll 两侧限位在 URDF 里高度不对称：一侧 ±0.3491(~20°) 贴近
+    躯干，另一侧 ±π(~180°) 需要从悬垂位绕过头顶。
+
+    无乐器时选"贴身"窄端（arm 更贴身体一侧）：
+        - left_shoulder_roll_joint: -0.3491 (lower)
+        - right_shoulder_roll_joint: +0.3491 (upper)
+
+    有乐器时选"外展"宽端（arm 远离乐器一侧），因为贴身方向被乐器挡住：
+        - left_shoulder_roll_joint: +3.1416 (upper)
+        - right_shoulder_roll_joint: -3.1416 (lower)
+    """
 
     side_map = {
         "left_shoulder_pitch_joint": -1,
-        "left_shoulder_roll_joint": +1,
+        "left_shoulder_roll_joint": -1,
         "left_shoulder_yaw_joint": +1,
         "left_elbow_pitch_joint": +1,
         "left_wrist_yaw_joint": +1,
         "left_wrist_pitch_joint": -1,
         "left_wrist_roll_joint": -1,
         "right_shoulder_pitch_joint": -1,
-        "right_shoulder_roll_joint": -1,
+        "right_shoulder_roll_joint": +1,
         "right_shoulder_yaw_joint": -1,
         "right_elbow_pitch_joint": +1,
         "right_wrist_yaw_joint": -1,
@@ -280,13 +292,27 @@ def preferred_stop_side(arm: str, joint_name: str) -> int:
         raise KeyError(f"No preferred stop configured for {arm} arm joint {joint_name}") from exc
 
 
-def default_neutral_pose(arm: str, joint_limits: Mapping[str, JointLimit]) -> Dict[str, float]:
+def default_neutral_pose(
+    arm: str,
+    joint_limits: Mapping[str, JointLimit],
+    instrument: str = "",
+) -> Dict[str, float]:
     outward_roll = 0.60 if arm == "left" else -0.60
+    pitch = -1.10
+    elbow = -0.90
+    if instrument and arm == "left":
+        outward_roll = 1.2
+        pitch = -2.50
+        elbow = -0.50
+    elif instrument and arm == "right":
+        outward_roll = -1.2
+        pitch = -2.50
+        elbow = -0.50
     pose = {
-        f"{arm}_shoulder_pitch_joint": -1.10,
+        f"{arm}_shoulder_pitch_joint": pitch,
         f"{arm}_shoulder_roll_joint": outward_roll,
         f"{arm}_shoulder_yaw_joint": 0.0,
-        f"{arm}_elbow_pitch_joint": -0.90,
+        f"{arm}_elbow_pitch_joint": elbow,
         f"{arm}_wrist_yaw_joint": 0.0,
         f"{arm}_wrist_pitch_joint": 0.0,
         f"{arm}_wrist_roll_joint": 0.0,
@@ -303,6 +329,7 @@ def step_hold_pose(
     approach_angle: float,
     neutral_pose: Mapping[str, float],
     joint_limits: Mapping[str, JointLimit],
+    instrument: str = "",
 ) -> Dict[str, float]:
     pose: Dict[str, float] = dict(neutral_pose)
 
@@ -314,21 +341,27 @@ def step_hold_pose(
     wrist_pitch = f"{arm}_wrist_pitch_joint"
     wrist_roll = f"{arm}_wrist_roll_joint"
 
+    has_inst = bool(instrument)
     outward_roll = 0.75 if arm == "left" else -0.75
+    if has_inst and arm == "left":
+        outward_roll = 1.2
+    elif has_inst and arm == "right":
+        outward_roll = -1.2
     pose[shoulder_roll] = clamp(
         outward_roll,
         joint_limits[shoulder_roll].lower + 0.08,
         joint_limits[shoulder_roll].upper - 0.08,
     )
     pose[elbow_pitch] = clamp(
-        -0.85,
+        -0.50 if has_inst else -0.85,
         joint_limits[elbow_pitch].lower + 0.08,
         joint_limits[elbow_pitch].upper - 0.08,
     )
 
     if target_joint == shoulder_roll:
+        sp_val = -2.50 if has_inst else -1.20
         pose[shoulder_pitch] = clamp(
-            -1.20,
+            sp_val,
             joint_limits[shoulder_pitch].lower + 0.08,
             joint_limits[shoulder_pitch].upper - 0.08,
         )
@@ -340,26 +373,26 @@ def step_hold_pose(
         )
     elif target_joint == shoulder_yaw:
         pose[shoulder_pitch] = clamp(
-            -1.00,
+            -2.50 if has_inst else -1.00,
             joint_limits[shoulder_pitch].lower + 0.08,
             joint_limits[shoulder_pitch].upper - 0.08,
         )
     elif target_joint == elbow_pitch:
         pose[shoulder_pitch] = clamp(
-            -1.00,
+            -2.50 if has_inst else -1.00,
             joint_limits[shoulder_pitch].lower + 0.08,
             joint_limits[shoulder_pitch].upper - 0.08,
         )
         pose[shoulder_yaw] = 0.0
     elif target_joint in {wrist_yaw, wrist_pitch, wrist_roll}:
         pose[shoulder_pitch] = clamp(
-            -0.95,
+            -2.50 if has_inst else -0.95,
             joint_limits[shoulder_pitch].lower + 0.08,
             joint_limits[shoulder_pitch].upper - 0.08,
         )
         pose[shoulder_yaw] = 0.0
         pose[elbow_pitch] = clamp(
-            -1.10,
+            -0.50 if has_inst else -1.10,
             joint_limits[elbow_pitch].lower + 0.08,
             joint_limits[elbow_pitch].upper - 0.08,
         )
@@ -368,16 +401,20 @@ def step_hold_pose(
     return pose
 
 
-def build_default_arm_calibration_plan(urdf_path: str | Path, arm: str) -> CalibrationPlan:
+def build_default_arm_calibration_plan(
+    urdf_path: str | Path,
+    arm: str,
+    instrument: str = "",
+) -> CalibrationPlan:
     all_limits = parse_joint_limits(urdf_path)
     joint_names = arm_joint_names(arm)
     joint_limits = {name: all_limits[name] for name in joint_names}
-    neutral_pose = default_neutral_pose(arm, joint_limits)
+    neutral_pose = default_neutral_pose(arm, joint_limits, instrument=instrument)
     steps: List[CalibrationStep] = []
 
     for joint_name in joint_names:
         limit = joint_limits[joint_name]
-        stop_direction = preferred_stop_side(arm, joint_name)
+        stop_direction = preferred_stop_side(arm, joint_name, instrument=instrument)
         stop_angle = limit.upper if stop_direction > 0 else limit.lower
         approach_angle = clamp(
             stop_angle - stop_direction * 0.20,
@@ -390,7 +427,10 @@ def build_default_arm_calibration_plan(urdf_path: str | Path, arm: str) -> Calib
             limit.lower + 0.03,
             limit.upper - 0.03,
         )
-        hold_pose = step_hold_pose(arm, joint_name, approach_angle, neutral_pose, joint_limits)
+        hold_pose = step_hold_pose(
+            arm, joint_name, approach_angle, neutral_pose, joint_limits,
+            instrument=instrument,
+        )
         steps.append(
             CalibrationStep(
                 target_joint=joint_name,

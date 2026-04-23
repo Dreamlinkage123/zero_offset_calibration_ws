@@ -3,7 +3,7 @@
 本仓库原先只有 `URDF/XML` 资产，没有控制或校准程序。现在新增了 `hard_stop_calibration.py`，用于两件事：
 
 1. 从 `URDF` 提取左右臂 7 个关节的转轴、限位和默认校准顺序。
-2. 提供一套“去硬限位 -> 检测触碰 -> 计算零偏 -> 回退卸力”的运行骨架，等待你接入底层电机/编码器接口。
+2. 提供一套"去硬限位 -> 检测触碰 -> 计算零偏 -> 回退卸力"的运行骨架，等待你接入底层电机/编码器接口。
 
 ## 适用关节链
 
@@ -17,35 +17,182 @@
 - `*_wrist_pitch_joint`
 - `*_wrist_roll_joint`
 
-默认基于 `casbot_band_urdf/urdf/CASBOT02_ENCOS_7dof_shell_20251015_P1L_guitar.urdf`。
+支持四种模型（关节链完全一致，区别在于乐器附件）：
 
-## 校准思路
+| 模型 | XML 文件 | URDF 文件 | 乐器附件 |
+|------|---------|----------|---------|
+| bare（纯躯干） | `*_P1L.xml` | `*_P1L.urdf` | 无 |
+| guitar | `*_P1L_guitar.xml` | `*_P1L_guitar.urdf` | 吉他（STL 合并在 waist mesh 中） |
+| bass | `*_P1L_bass.xml` | `*_P1L_bass.urdf` | 贝斯（STL 合并在 waist mesh 中） |
+| keyboard | `*_P1L_keyboard.xml` | `*_P1L_keyboard.urdf` | 电子琴（独立 body，含琴键铰链） |
 
-程序默认采用下面的零偏定义：
+## 零偏标定原理
 
-```text
-joint_angle = encoder_sign * encoder_position + zero_offset
+### 问题定义
+
+工业机器人在组装、维修或更换编码器后，编码器零点与关节物理零位之间存在一个固定偏差，称为**零位偏移（zero offset）**。如不补偿，机器人运动学解算和轨迹规划会产生系统性误差。
+
+硬限位零偏标定利用关节运动范围两端的**机械硬停**（hard stop）作为已知参考点：将关节缓慢驱动至机械硬限位，通过检测运动停止来确定编码器在该位置的读数，再与模型中标注的硬限位角度对比，即可算出偏移量。
+
+### 数学模型
+
+关节角与编码器的对应关系为：
+
+```
+θ = s · e + δ
 ```
 
-当关节碰到已知硬限位时，若该硬限位在模型中的参考角度为 `q_stop`，编码器读数为 `enc_stop`，则：
+| 符号 | 含义 |
+|------|------|
+| θ | 真实关节角度（rad），定义于 URDF 坐标系 |
+| e | 编码器原始读数（rad） |
+| s | 编码器符号（`+1` 或 `-1`），取决于编码器安装方向与 URDF 正方向的关系 |
+| δ | 零位偏移（zero offset），即要求解的未知量 |
 
-```text
-zero_offset = q_stop - encoder_sign * enc_stop
+当关节顶到机械硬限位时，真实角度 θ 等于 URDF/XML 中定义的关节限位值 `θ_stop`，此时编码器读数为 `e_stop`，代入得：
+
+```
+θ_stop = s · e_stop + δ
 ```
 
-其中 `encoder_sign` 需要你结合驱动方向定义填写，通常取 `+1` 或 `-1`。
+解出：
 
-## 硬限位检测逻辑
+```
+δ = θ_stop − s · e_stop
+```
 
-`HardStopCalibrator` 中的默认判据是：
+对应代码 `HardStopCalibrator.compute_zero_offset()`：
 
-- 持续给目标关节一个低速搜索速度；
-- 最近一小段时间内编码器变化很小；
-- 关节估计速度接近 0；
-- 电机电流达到该关节阈值的一定比例；
-- 满足以上条件后认为已经顶到机械硬限位。
+```python
+offset = reference_angle - encoder_sign * encoder_position
+```
 
-这套判据是为了兼容大多数伺服驱动器的“低速顶靠”流程，但阈值必须根据实机调试。
+### 前提假设
+
+1. **硬限位与模型一致**：物理硬停位置必须与 URDF `<limit lower="..." upper="..."/>` 中的值吻合。若存在缓冲垫、弹性止挡等软因素，需要在 `stop_angle` 中补偿。
+2. **编码器线性且无间隙**：编码器 e 与关节角 θ 之间仅差一个符号和常数偏移，没有非线性或多圈漂移。
+3. **符号已知**：`encoder_sign` 必须事先确认；如果 s 搞反，offset 的误差为 2·s·e_stop，通常远大于正常偏移值。
+
+### 单关节标定流程
+
+对每个待标定关节，执行以下 5 步：
+
+```
+┌──────────────────────────────────────────────────────────┐
+│ ① hold_pose: 将所有关节移到安全姿态，目标关节到 approach  │
+│ ② settle:    等待惯性衰减（默认 0.06 s）                 │
+│ ③ search:    对目标关节施加恒力矩（或恒速度），驱向硬限位 │
+│ ④ detect:    滑动窗口判停，确认已顶到硬限位              │
+│ ⑤ compute:   读取编码器，计算 δ = θ_stop − s · e_stop    │
+│ ⑥ backoff:   回退到安全角度，解除关节力                   │
+└──────────────────────────────────────────────────────────┘
+```
+
+#### ① hold_pose — 安全预置
+
+先将 7 个关节整体移到一个"holding pose"，使手臂远离身体和乐器，同时把目标关节定位到距硬限位约 0.20 rad 的 approach 角度。其余关节保持 neutral/外展姿态，避免搜索过程中前臂或腕部扫过障碍物。
+
+holding pose 因目标关节不同而变化——例如标定 shoulder_roll 时 shoulder_pitch 更低（手臂下垂更多），标定 wrist 时 elbow 更弯（缩短前臂力臂）。详见 `step_hold_pose()` 的分支逻辑。
+
+#### ② settle — 惯性衰减
+
+移动完成后等待一小段时间（`settle_seconds`），让关节振荡衰减至稳态，确保后续采样不受过渡态干扰。
+
+#### ③ search — 驱动到硬限位
+
+支持两种搜索模式：
+
+| 模式 | 控制律 | 适用场景 |
+|------|--------|---------|
+| `torque_damping`（默认） | τ = sign · T − b · q̇ | 仿真与力矩可控的驱动器，接触刚性更好 |
+| `velocity` | q̇_cmd = search_velocity | 仅支持速度/位置接口的驱动器 |
+
+- **力矩-阻尼模式**：施加固定幅值的恒力矩 T（默认 8 N·m），同时加上与角速度成比例的阻尼项 b（默认 3 N·m·s/rad），使关节缓慢、平稳地顶靠到硬限位。阻尼项让关节在硬限位附近不会产生冲击。
+- **速度模式**：直接给一个低速命令（由 `search_velocity` 确定），在速度环层面驱动关节；适合无法下发力矩的位置/速度接口。
+
+#### ④ detect — 滑动窗口判停
+
+硬限位检测使用一个**固定时间窗口**（`stall_time_seconds`，默认 0.12–0.20 s）内的采样历史，需要**同时满足**以下 4 个条件才判定已顶到硬停：
+
+```
+判停条件 = 时间充足 ∧ 位置稳定 ∧ 速度为零 ∧ 电流达标
+```
+
+| 条件 | 公式 | 默认阈值 | 含义 |
+|------|------|---------|------|
+| 时间充足 | t_newest − t_oldest ≥ stall_time × 0.98 | 0.12 s | 窗口已经收集了足够长的数据 |
+| 位置稳定 | \|e_newest − e_oldest\| ≤ ε_pos | 0.015 rad | 编码器在窗口内几乎没动 |
+| 速度为零 | \|v_newest\| ≤ ε_vel | 0.2 rad/s | 当前估计角速度接近零 |
+| 电流达标 | \|I_newest\| ≥ I_threshold × ratio | ratio=0.08 | 电机电流表明关节在承受负载（非空载停转） |
+
+滑动窗口的实现：每次采样后剔除窗口之外的旧样本，保留最近 `stall_time_seconds` 内的数据。这比固定采样数更鲁棒——不依赖采样周期。
+
+对应代码：
+
+```python
+# 采样循环（hard_stop_calibration.py: HardStopCalibrator.calibrate）
+while True:
+    sample = hardware.read_sample(step.target_joint)
+    history.append(sample)
+    # 只保留 stall_time 时间窗口内的采样
+    history = [h for h in history
+               if sample.timestamp - h.timestamp <= stall_time]
+
+    if self._stopped_on_hard_limit(history, current_threshold):
+        # 检测到硬限位，计算零偏
+        offset = reference_angle - sign * sample.encoder_position
+        break
+```
+
+#### ⑤ compute — 计算零偏
+
+判停后立即读取当前编码器值 `e_stop`，用上面推导的公式计算：
+
+```
+δ = θ_stop − s · e_stop
+```
+
+计算完毕后调用 `apply_zero_offset()` 将偏移写入控制器 RAM，**后续标定步骤立即生效**。
+
+#### ⑥ backoff — 卸力回退
+
+将目标关节回退到距硬限位约 0.06 rad 的安全位置（`backoff_angle`），避免关节长期顶在硬限位上造成电机过热或机械磨损。
+
+### 全臂标定编排
+
+单臂 7 个关节按固定顺序逐一标定（默认：roll → pitch → yaw → elbow → 3×wrist），每个关节执行上述 ①–⑥ 完整流程。顺序的设计原则：
+
+1. **先大关节后小关节**：shoulder 先标定，建立近端精度基准；wrist 最后标定，此时肩肘已经校准。
+2. **roll 先于 pitch**：roll 校准后手臂展开方向准确，pitch 搜索方向不受 roll 偏差影响。
+3. **安全递进**：每个关节在 hold_pose 中对其余 6 个关节都有明确约束，确保标定运动不穿越障碍。
+
+### 关键参数及其物理意义
+
+| 参数 | 默认值 | 作用 | 调整建议 |
+|------|--------|------|---------|
+| `stop_angle` | URDF 上/下限 | 硬限位参考角度 | 若有缓冲垫需修正 |
+| `approach_angle` | stop − 0.20 rad | 搜索起始位置 | 不宜太远（浪费时间）也不宜太近（可能误判） |
+| `backoff_angle` | stop − 0.06 rad | 卸力位置 | 大于碰撞体回弹距离即可 |
+| `search_velocity` | ±0.05–0.20 rad/s | 速度模式搜索速度 | 太快容易冲过，太慢浪费时间 |
+| `torque_search_nm` | 8.0 N·m | 力矩模式恒力矩 | 需大于关节摩擦+重力矩，但不可过大 |
+| `torque_damping_nm_s` | 3.0 N·m·s/rad | 力矩模式阻尼系数 | 越大越柔，但响应越慢 |
+| `stall_time_seconds` | 0.12 s | 判停窗口长度 | 增大提高稳定性但增加时间 |
+| `position_window_epsilon` | 0.015 rad | 窗口内位置变化阈值 | 编码器噪声大则增大 |
+| `velocity_epsilon` | 0.2 rad/s | 速度判零阈值 | 与估算精度匹配 |
+| `min_current_ratio` | 0.08 | 电流达标比例 | 空载电流大则增大 |
+| `current_thresholds` | 0.35 A (仿真) | 各关节电流门限 | 实机需实测确定 |
+| `encoder_signs` | +1 (仿真) | 编码器方向符号 | 必须根据实机确认 |
+
+### 仿真与真机的差异
+
+| 方面 | MuJoCo 仿真 | 真机（ROS2） |
+|------|------------|-------------|
+| 硬限位来源 | `<joint range="..."/>` | 物理硬停 |
+| 编码器 | `d.qpos[joint_adr]`（无噪声） | `JointState.position`（有噪声） |
+| 电流 | `d.sensordata[tau_adr]`（理想力矩） | `JointState.effort`（含摩擦等） |
+| 时间戳 | 仿真时间（可快于实时） | `time.monotonic()`（实时） |
+| 搜索方式 | 力矩-阻尼（直接控制 ctrl） | 位置增量（UpperJointData） |
+| shoulder_roll offset | ≈±0.03 rad（碰撞体误差） | 取决于实际硬停 |
 
 ## 默认姿态设计原则
 
@@ -54,9 +201,43 @@ zero_offset = q_stop - encoder_sign * enc_stop
 - 肩关节优先把手臂外展，尽量远离躯干；
 - 肘部默认保持一定弯曲，减少前臂扫到本体的概率；
 - 腕部校准时，肩肘保持在稳定的中间姿态，只让末端关节单独搜索；
-- 左右臂对称关节会选择不同的推荐硬限位方向，例如左右肩 roll、左右腕 roll。
+- 左右臂对称关节会选择不同的推荐硬限位方向，例如左右肩 roll、左右腕 roll；
+- `shoulder_roll` 选"贴身"窄端（`±0.3491 rad`）——URDF 里该关节两侧极度不对称，一侧 `±π`，从悬垂位绕过头顶必然先撞到躯干/头部，仿真中会导致零偏算错、动作穿模（详见 `hard_stop_calibration.preferred_stop_side` 注释）。
 
-因为仓库里没有碰撞模型求解或电机控制代码，这些姿态必须在实机上先做慢速验证。
+### Rest pose（避开大腿）
+
+双臂自然下垂（全零位）时前臂会与大腿干涉。仿真中定义了 rest pose：`shoulder_roll` 外展 10°（0.175 rad），其余关节为 0，作为标定的起始和结束姿态。常量 `_REST_ROLL_RAD` 在 `mujoco_hard_stop_calibration.py` 中，可按需调整。
+
+### 乐器感知的避障姿态
+
+当 `build_default_arm_calibration_plan()` 传入 `instrument="guitar"` 或 `"bass"` 时，neutral 和 hold pose 会自动调整以避开乐器碰撞体：
+
+| 参数 | 无乐器 | 有乐器 |
+|------|--------|--------|
+| neutral shoulder_pitch | -1.10 rad | **-2.50 rad**（手臂高举过头，前臂从上方绕过琴颈） |
+| neutral shoulder_roll | ±0.60 rad | **±1.20 rad**（更大外展，远离琴身） |
+| neutral elbow_pitch | -0.90 rad | **-0.50 rad**（放松弯曲，减小前臂横向伸展） |
+| shoulder_roll hold pitch | -1.20 rad | **-2.50 rad**（保证 roll 内收至 -0.35 时前臂在琴颈上方） |
+| 其它 hold pitch | -0.95 ~ -1.00 | **-2.50 rad** |
+
+### Waypoint 轨迹规划
+
+MuJoCo 仿真中大幅度姿态过渡采用分段 waypoint 策略，避免同步移动多个关节时前臂扫过乐器：
+
+**标定开始（rest → neutral）：**
+
+1. 先到 rest pose（双臂外展 10° 避开大腿）
+2. WP1："先展"——roll 展到 neutral 值，pitch/elbow 保持 0（手臂在外侧，远离琴身）
+3. WP2："后抬"——pitch 抬到 neutral 值（手臂已外展，安全绕过琴身和琴颈）
+4. 到完整 neutral（含 elbow 弯曲等）
+
+**标定结束（neutral → rest），setup 的精确逆序：**
+
+1. 回到 neutral（从最后一步 hold pose 回到已知安全姿态）
+2. rev-WP2：pitch 降到 0，roll 保持外展（手臂在外侧向下摆）
+3. rev-WP1：roll 收回 rest 值（手臂已悬垂，收 roll 不碰乐器）
+
+无乐器模型（bare）的 neutral pitch 较小，不需要 waypoint，直接从 rest 到 neutral。
 
 ## 推荐校准顺序
 
@@ -83,13 +264,10 @@ python3 hard_stop_calibration.py \
   --print-plan
 ```
 
-查看右臂计划：
+查看双臂计划：
 
 ```bash
-python3 hard_stop_calibration.py \
-  --urdf casbot_band_urdf/urdf/CASBOT02_ENCOS_7dof_shell_20251015_P1L_guitar.urdf \
-  --arm right \
-  --print-plan
+python3 mujoco_hard_stop_calibration.py --arm both --print-plan
 ```
 
 输出会同时给出：
@@ -140,22 +318,56 @@ python3 ros2_upper_body_hardware.py --arm right --persist
 
 ## MuJoCo 仿真标定
 
-使用仓库内 `casbot_band_urdf/xml/CASBOT02_ENCOS_7dof_shell_20251015_P1L_guitar.xml`。腿部无执行器，仿真中在每一步将腿关节锁回初值。`move_to_pose` 在 PD 超时后会做一次运动学拉齐再阻尼，便于在仿真里尽快到达标定姿态。
+支持仓库内 `casbot_band_urdf/xml/` 下的四种模型（bare / guitar / bass / keyboard），自动检测乐器类型并生成对应碰撞 primitive 和避障姿态。支持 `--arm left`、`--arm right` 或 `--arm both`（双臂顺序标定，共用一个模型和 viewer 窗口）。
 
-依赖：`pip install mujoco`（本机已测 MuJoCo 3.3.x）。`read_sample` 使用**仿真时间戳**，与 `HardStopCalibrator` 配套；判停逻辑在 `hard_stop_calibration.py` 中对停留时长做了少量容差，避免固定步长导致永远达不到“满窗口时长”。
+腿部无执行器，仿真中在每一步将腿关节锁回初值。`move_to_pose` 按"当前位姿→目标"的真实距离动态分配步数，不足时追加阻尼收尾，**不做 qpos 直写的"瞬移"回退**，避免 viewer 上看到的跳变和穿模。
+
+依赖：`pip install mujoco`（本机已测 MuJoCo 3.3.x）。`read_sample` 使用**仿真时间戳**，与 `HardStopCalibrator` 配套；判停逻辑在 `hard_stop_calibration.py` 中对停留时长做了少量容差，避免固定步长导致永远达不到"满窗口时长"。
+
+**标定流程（以 `--arm both` 为例）：**
+
+1. 模型加载，双臂碰撞过滤同时启用
+2. 左臂：rest → waypoint setup → neutral → 7 关节标定 → waypoint reset → rest
+3. 右臂：rest → waypoint setup → neutral → 7 关节标定 → waypoint reset → rest
+4. 写出合并的 14 关节 YAML
+5. `--visualize` 时 viewer 保持打开，关闭窗口退出
 
 ```bash
-# 仅打印 URDF 计划
-python3 mujoco_hard_stop_calibration.py --arm right --print-plan
+# 双臂标定（默认 guitar 模型）
+python3 mujoco_hard_stop_calibration.py --arm both --out zero_offsets_mujoco.yaml
 
-# 跑通仿真并写出 zero_offsets_mujoco.yaml
-python3 mujoco_hard_stop_calibration.py --arm right --out zero_offsets_mujoco.yaml
+# 双臂标定 + 可视化
+python3 mujoco_hard_stop_calibration.py --arm both --out zero_offsets_mujoco.yaml --visualize
 
-# 打开 MuJoCo 交互窗口，实时看机械臂各步顶靠与姿态（mujoco.viewer.launch_passive）
-python3 mujoco_hard_stop_calibration.py --arm right --out zero_offsets_mujoco.yaml --visualize
+# 单臂标定
+python3 mujoco_hard_stop_calibration.py --arm left --out zero_offsets_mujoco.yaml
+
+# 仅打印 URDF 计划（双臂）
+python3 mujoco_hard_stop_calibration.py --arm both --print-plan
+
+# 使用 bass 模型
+python3 mujoco_hard_stop_calibration.py \
+  --model-xml casbot_band_urdf/xml/CASBOT02_ENCOS_7dof_shell_20251015_P1L_bass.xml \
+  --urdf casbot_band_urdf/urdf/CASBOT02_ENCOS_7dof_shell_20251015_P1L_bass.urdf \
+  --arm both --out zero_offsets_mujoco.yaml
+
+# 使用 bare（无乐器）模型
+python3 mujoco_hard_stop_calibration.py \
+  --model-xml casbot_band_urdf/xml/CASBOT02_ENCOS_7dof_shell_20251015_P1L.xml \
+  --urdf casbot_band_urdf/urdf/CASBOT02_ENCOS_7dof_shell_20251015_P1L.urdf \
+  --arm both --out zero_offsets_mujoco.yaml
+
+# 使用 keyboard（电子琴）模型
+python3 mujoco_hard_stop_calibration.py \
+  --model-xml casbot_band_urdf/xml/CASBOT02_ENCOS_7dof_shell_20251015_P1L_keyboard.xml \
+  --urdf casbot_band_urdf/urdf/CASBOT02_ENCOS_7dof_shell_20251015_P1L_keyboard.urdf \
+  --arm both --out zero_offsets_mujoco.yaml
+
+# 打开 MuJoCo 交互窗口，实时看机械臂各步顶靠与姿态
+python3 mujoco_hard_stop_calibration.py --arm both --out zero_offsets_mujoco.yaml --visualize
 
 # 降低 sync 频率加快速度：每 8 步仿真再刷新一帧
-python3 mujoco_hard_stop_calibration.py --arm right --visualize --viewer-sync-every 8
+python3 mujoco_hard_stop_calibration.py --arm both --visualize --viewer-sync-every 8
 
 # 注入常值编码器偏差（JSON），用于验证 offset ≈ -bias（sign=+1）
 # echo '{"right_wrist_yaw_joint": 0.05}' > /tmp/bias.json
@@ -164,7 +376,85 @@ python3 mujoco_hard_stop_calibration.py --arm right --visualize --viewer-sync-ev
 
 无图形环境（如 CI）下不要用 `--visualize`；本机需可用 OpenGL/GLFW 的显示环境。
 
-说明：仿真里“硬限位”即关节 `range` 约束，与真机机械硬停有差别；个别关节若与 URDF 限位细微不一致，可能出现略大的算得零偏。
+说明：仿真里"硬限位"即关节 `range` 约束，与真机机械硬停有差别；`shoulder_roll` 因躯干碰撞体比 URDF limit 提前约 0.03 rad 拦住手臂，导致 offset 约 ±0.03 rad，其余 6 个关节 offset < 0.002 rad。
+
+### 手臂 ↔ 躯干/乐器 碰撞过滤（`load_model_with_collision_filter`）
+
+#### 根因：XML 默认禁用所有碰撞
+
+原始 XML 的 `<default>` 里设了 `conaffinity="0"`，所有 body 的碰撞几何都没有显式覆盖，MuJoCo 的位掩码判定 `(contype_i & conaffinity_j) | (contype_j & conaffinity_i)` 永远为 0——**整个模型没有任何 body 间碰撞**。
+
+#### 为什么不能运行时 patch
+
+运行时改 `m.geom_contype[g] / m.geom_conaffinity[g]` **不影响碰撞**——MuJoCo 在 `compile()` 时把 pair-filter 缓存了。因此必须走 `mujoco.MjSpec` 路径，在编译前修改再编译。
+
+#### 碰撞位掩码方案
+
+`load_model_with_collision_filter(xml, arm)` 在编译期（`arm` 可为 `"left"`/`"right"`/`"both"`）：
+
+- 手臂远端链路（`{arm}_shoulder_roll_link` 及以下，左手包含五指各段）：`contype=1, conaffinity=2`；
+- `head_yaw_link / head_pitch_link`：`contype=2, conaffinity=1`；
+- 其它 body 显式清零，避免相邻骨段永久接触产生噪声。
+
+#### 乐器自动检测与碰撞 primitive 注册
+
+系统通过两种方式自动推断乐器类型（`_detect_instrument()`）：
+
+1. **mesh 名检测**：`waist_yaw_link` 引用的 mesh 文件名含 `guitar` 或 `bass` → 对应接触类乐器。
+2. **独立 body 检测**：worldbody 中存在名为 `keyboard` 的独立 body → 电子琴。
+
+对于 guitar/bass（接触类），**删除**原始 mesh collider（MuJoCo 凸包远大于真实轮廓），然后注入对应的 box primitive：
+
+| primitive | bare | guitar | bass |
+|-----------|------|--------|------|
+| `waist_torso_collider` | ✓ center(0.02, 0, 0.18) half(0.11, 0.115, 0.19) | ✓ 同左 | ✓ 同左 |
+| `{inst}_body_collider` | — | ✓ center(0.145, -0.125, -0.06) half(0.055, 0.275, 0.13) | ✓ center(0.12, -0.17, -0.09) half(0.05, 0.15, 0.14) |
+| `{inst}_neck_collider` | — | ✓ center(0.162, 0.285, 0.08) half(0.018, 0.135, 0.06) | ✓ center(0.22, 0.31, 0.15) half(0.015, 0.16, 0.05) |
+
+各尺寸通过对比 `waist_yaw_link.STL`（纯躯干）与 `waist_yaw_link_{instrument}.STL`（躯干+乐器）的顶点差集在 Y/Z 切片下的分布估算。
+
+设计取舍：
+- **torso box** Y 半轴 0.115（略窄于真实 ±0.145），避免 shoulder_roll_link 在肩窝处贴着 box 壁产生微接触。
+- **乐器琴身** box 覆盖身体正前方低段，只拦挡"手臂横跨身体穿过琴身"的路径。
+- **乐器琴颈** box 很细，拦住"手臂直接穿过琴颈"的情况。
+- **背带(strap)** 不加碰撞——柔性织物，与左臂 hanging 空间完全重合，加了就无法让手臂回到自然姿态。
+
+#### 验证结果
+
+四种模型 × 双臂（`--arm both`）标定结果：
+
+| 模型 | shoulder_roll offset | 其余 6 关节 max offset | 双臂总耗时 |
+|------|---------------------|----------------------|-----------|
+| guitar | ±0.030 rad | < 0.002 rad | ~14 s |
+| bass | ±0.030 rad | < 0.002 rad | ~15 s |
+| bare | ±0.030 rad | < 0.002 rad | ~13 s |
+| keyboard | ±0.030 rad | < 0.002 rad | ~13 s |
+
+`shoulder_roll` 的 ±0.03 rad 偏差来自躯干 box 在 URDF 硬限位前几毫米拦住手臂（物理上合理——现实中手臂也会先碰到身体）。
+
+#### keyboard（电子琴）的特殊处理
+
+电子琴模型与 guitar/bass 不同：琴体以独立 body（含数十个琴键铰链关节和 box 几何体）放置在 worldbody 中，而非融入 `waist_yaw_link` 的 mesh。由于电子琴距机器人较远（约 0.5 m），手臂标定轨迹不会接触琴体，因此：
+
+- **编译期剥离**：`load_model_with_collision_filter()` 检测到 keyboard body 后整体删除，消除 52 个多余 DOF 和 ~88 个多余 geom，物理步进和渲染性能回到 bare 水平。
+- **求解器重置**：keyboard XML 含有为琴键接触优化的重型求解器设置（`implicitfast`, `cone=elliptic`, `tolerance=1e-9`, `iterations=150`），标定不需要，一律重置为 Euler + pyramidal 默认值。
+- **标定姿态**：使用 bare（无乐器）的 neutral / hold pose，不触发乐器感知的高抬臂路径。
+
+### 扩展新乐器
+
+如需支持新的接触类乐器（如另一种弦乐器），步骤：
+
+1. 准备 `waist_yaw_link_{name}.STL`、对应的 XML 和 URDF；
+2. 用 `waist_yaw_link.STL`（纯躯干）做顶点差集分析，确定琴身/琴颈的 AABB；
+3. 在 `mujoco_hard_stop_calibration.py` 的 `_INSTRUMENT_COLLIDERS` 字典中添加 `"{name}": [...]`；
+4. 跑 48 项静态姿态检查（模型 × 2 臂 × 8 poses）确认零碰撞；
+5. 跑完整标定确认所有 offset < 0.03 rad。
+
+如需支持新的独立乐器（如 drum），步骤：
+
+1. 准备对应的 XML（琴体作为 worldbody 下独立 body）和 URDF（与 bare 相同）；
+2. 在 `_STANDALONE_INSTRUMENT_BODIES` 集合中添加 body 名称；
+3. 确认乐器距机器人足够远，标定轨迹不经过其空间。
 
 ## 建议的实机接入步骤
 
@@ -175,7 +465,10 @@ python3 mujoco_hard_stop_calibration.py --arm right --visualize --viewer-sync-ev
 
 ## 当前局限
 
-- 目前仅根据 `URDF` 限位和左右对称关系给出推荐姿态，没有做碰撞检测。
+- 碰撞 primitive 基于 mesh 顶点 AABB 手动估算，非精确贴合；shoulder_roll 约 ±0.03 rad 的偏差即来自此（现实中需在实机标定补偿）。
+- 背带(strap)不加碰撞——现实中为柔性织物；仿真里 viewer 看到手臂与背带可视 mesh 交叠是预期行为。
+- 乐器感知的避障姿态让手臂在 pitch ≈ -2.5 rad（高举过头）的位置运动，真机需确认此范围安全。
+- `shoulder_roll` 的 `preferred_stop_side` 选在 ±0.3491 rad 一侧；现场若只在宽端装了硬停，需显式覆盖并先做碰撞路径评估。
 - ROS2 路径依赖现场 topic 与 `UpperJointData` 字段定义；与产线 msg 若不一致，需在 `ros2_upper_body_hardware.py` 中做少量对齐。
 - 无自带急停与故障恢复，须在现场安全流程内使用。
 
