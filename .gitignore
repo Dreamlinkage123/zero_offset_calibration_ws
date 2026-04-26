@@ -1,0 +1,19 @@
+# colcon / ament 构建与安装产物
+build/
+build_*/
+install/
+install_*/
+log/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+
+docker_env/

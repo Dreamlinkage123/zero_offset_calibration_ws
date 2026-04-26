@@ -23,7 +23,7 @@
         iyz="4.58E-06"
         izz="0.012669" />
     </inertial>
-    <visual>
+    <visual name="visual_base_link">
       <origin
         xyz="0 0 0"
         rpy="0 0 0" />
@@ -63,7 +63,7 @@
         iyz="-0.00071248"
         izz="0.0026698" />
     </inertial>
-    <visual>
+    <visual name="visual_left_leg_pelvic_pitch_link">
       <origin
         xyz="0 0 0"
         rpy="0 0 0" />
@@ -121,7 +121,7 @@
         iyz="2.152E-05"
         izz="0.0013377" />
     </inertial>
-    <visual>
+    <visual name="visual_left_leg_pelvic_roll_link">
       <origin
         xyz="0 0 0"
         rpy="0 0 0" />
@@ -179,7 +179,7 @@
         iyz="-0.0012251"
         izz="0.0060704" />
     </inertial>
-    <visual>
+    <visual name="visual_left_leg_pelvic_yaw_link">
       <origin
         xyz="0 0 0"
         rpy="0 0 0" />
@@ -237,7 +237,7 @@
         iyz="-0.0022958"
         izz="0.0056905" />
     </inertial>
-    <visual>
+    <visual name="visual_left_leg_knee_pitch_link">
       <origin
         xyz="0 0 0"
         rpy="0 0 0" />
@@ -295,7 +295,7 @@
         iyz="0"
         izz="1.044E-05" />
     </inertial>
-    <visual>
+    <visual name="visual_left_leg_ankle_pitch_link">
       <origin
         xyz="0 0 0"
         rpy="0 0 0" />
@@ -353,7 +353,7 @@
         iyz="-1.06E-05"
         izz="0.0062384" />
     </inertial>
-    <visual>
+    <visual name="visual_left_leg_ankle_roll_link">
       <origin
         xyz="0 0 0"
         rpy="0 0 0" />
@@ -411,7 +411,7 @@
         iyz="0.00072134"
         izz="0.0026803" />
     </inertial>
-    <visual>
+    <visual name="visual_right_leg_pelvic_pitch_link">
       <origin
         xyz="0 0 0"
         rpy="0 0 0" />
@@ -469,7 +469,7 @@
         iyz="-3.349E-05"
         izz="0.0013419" />
     </inertial>
-    <visual>
+    <visual name="visual_right_leg_pelvic_roll_link">
       <origin
         xyz="0 0 0"
         rpy="0 0 0" />
@@ -527,7 +527,7 @@
         iyz="0.0012683"
         izz="0.0060747" />
     </inertial>
-    <visual>
+    <visual name="visual_right_leg_pelvic_yaw_link">
       <origin
         xyz="0 0 0"
         rpy="0 0 0" />
@@ -585,7 +585,7 @@
         iyz="0.002294"
         izz="0.0056954" />
     </inertial>
-    <visual>
+    <visual name="visual_right_leg_knee_pitch_link">
       <origin
         xyz="0 0 0"
         rpy="0 0 0" />
@@ -643,7 +643,7 @@
         iyz="0"
         izz="1.044E-05" />
     </inertial>
-    <visual>
+    <visual name="visual_right_leg_ankle_pitch_link">
       <origin
         xyz="0 0 0"
         rpy="0 0 0" />
@@ -701,7 +701,7 @@
         iyz="9.99E-06"
         izz="0.0070709" />
     </inertial>
-    <visual>
+    <visual name="visual_right_leg_ankle_roll_link">
       <origin
         xyz="0 0 0"
         rpy="0 0 0" />
@@ -759,13 +759,13 @@
         iyz="1.709E-05"
         izz="0.073851" />
     </inertial>
-    <visual>
+    <visual name="visual_waist_yaw_link">
       <origin
         xyz="0 0 0"
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="../meshes/waist_yaw_link.STL" />
+          filename="../meshes/waist_yaw_link_bass.STL" />
       </geometry>
       <material
         name="">
@@ -773,13 +773,13 @@
           rgba="0.79216 0.81961 0.93333 1" />
       </material>
     </visual>
-    <collision>
+    <collision name="collision_waist_yaw_link">
       <origin
         xyz="0 0 0"
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="../meshes/waist_yaw_link.STL" />
+          filename="../meshes/waist_yaw_link_bass.STL" />
       </geometry>
     </collision>
   </link>
@@ -970,8 +970,8 @@
     <axis
       xyz="0 1 0" />
     <limit
-      lower="-3.1416"
-      upper="1.0472"
+      lower="-3.22886"
+      upper="1.60570"
       effort="75"
       velocity="12.2" />
   </joint>
@@ -1033,8 +1033,8 @@
     <axis
       xyz="1 0 0" />
     <limit
-      lower="-0.3491"
-      upper="3.1416"
+      lower="-0.34906585"
+      upper="3.14159265"
       effort="75"
       velocity="12.2" />
   </joint>
@@ -1149,8 +1149,8 @@
     <axis
       xyz="0 1 0" />
     <limit
-      lower="-2.268"
-      upper="0"
+      lower="-2.26893"
+      upper="0.34907"
       effort="75"
       velocity="12.2" />
   </joint>
@@ -1334,71 +1334,7 @@
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  <!--right arm-->
-
+    <!--right arm-->
   <link
     name="right_shoulder_pitch_link">
     <inertial>
@@ -1452,8 +1388,8 @@
     <axis
       xyz="0 1 0" />
     <limit
-      lower="-3.1416"
-      upper="1.0472"
+      lower="-3.22886"
+      upper="1.60570"
       effort="75"
       velocity="12.2" />
   </joint>
@@ -1515,8 +1451,8 @@
     <axis
       xyz="1 0 0" />
     <limit
-      lower="-3.1416"
-      upper="0.3491"
+      lower="-3.14159265"
+      upper="0.34906585"
       effort="75"
       velocity="12.2" />
   </joint>
@@ -1573,8 +1509,8 @@
     <axis
       xyz="0 0 1" />
     <limit
-      lower="-1.5708"
-      upper="1.5708"
+      lower="-1.57079633"
+      upper="1.57079633"
       effort="36"
       velocity="9.3" />
   </joint>
@@ -1631,8 +1567,8 @@
     <axis
       xyz="0 1 0" />
     <limit
-      lower="-2.268"
-      upper="0"
+      lower="-2.26893"
+      upper="0.34907"
       effort="75"
       velocity="12.2" />
   </joint>
@@ -1689,8 +1625,8 @@
     <axis
       xyz="0 0 1" />
     <limit
-      lower="-1.5708"
-      upper="1.5708"
+      lower="-1.57079633"
+      upper="1.57079633"
       effort="36"
       velocity="9.3" />
   </joint>
@@ -1747,8 +1683,8 @@
     <axis
       xyz="0 1 0" />
     <limit
-      lower="-1.0472"
-      upper="1.0472"
+      lower="-1.04719755"
+      upper="1.04719755"
       effort="36"
       velocity="9.3" />
   </joint>
@@ -1805,17 +1741,11 @@
     <axis
       xyz="1 0 0" />
     <limit
-      lower="-1.0472"
-      upper="1.5708"
+      lower="-1.04719755"
+      upper="1.57079633"
       effort="36"
       velocity="9.3" />
   </joint>
-
-
-
-
-
-
 
 
 
@@ -2924,7 +2854,6 @@
   <joint
     name="right_index_dip_joint"
     type="revolute">
-    
     <origin
       xyz="-0.000999999999795301 0 0.0420000000000047"
       rpy="0 0 0" />
@@ -3099,7 +3028,6 @@
   <joint
     name="right_middle_dip_joint"
     type="revolute">
- 
     <origin
       xyz="-0.00125209669047528 0 0.047144897303592"
       rpy="0 0 0" />
@@ -3274,7 +3202,6 @@
   <joint
     name="right_ring_dip_joint"
     type="revolute">
-    
     <origin
       xyz="-0.000999999999795358 0 0.0420000000000049"
       rpy="0 0 0" />
@@ -3522,23 +3449,6 @@
       effort="0"
       velocity="0" />
   </joint>
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
-  
   
   
   

@@ -1,0 +1,10 @@
+# MuJoCo hard-stop zero-offset calibration (radians).
+# model=CASBOT02_ENCOS_7dof_shell_20251015_P1L_bass.xml arm=left
+
+left_elbow_pitch_joint: -0.0018732492943999146
+left_shoulder_pitch_joint: 0.0013783531076487776
+left_shoulder_roll_joint: -0.0009648992584350147
+left_shoulder_yaw_joint: -0.0017959891484171653
+left_wrist_pitch_joint: 0.001688259406181114
+left_wrist_roll_joint: 0.001698277310779428
+left_wrist_yaw_joint: -0.0015787470877508536

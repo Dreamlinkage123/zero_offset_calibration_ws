@@ -1,3 +1,101 @@
+## ROS 2 功能包布局
+
+本目录已封装为 ament_python 包 `zero_offset_calibration`（`src/zero_offset_calibration/`）：
+
+```
+zero_offset_calibration/
+├── package.xml / setup.py / setup.cfg
+├── resource/zero_offset_calibration       # ament 资源标记
+├── zero_offset_calibration/               # Python import 路径
+│   ├── __init__.py
+│   ├── _paths.py                           # share/ 目录定位辅助
+│   ├── hard_stop_calibration.py            # 规划 + 运行骨架（无 ROS/MuJoCo）
+│   ├── mujoco_hard_stop_calibration.py     # MuJoCo 仿真适配器
+│   └── ros2_upper_body_hardware.py         # ROS 2 真机适配器
+├── casbot_band_urdf/                       # 安装到 share/<pkg>/casbot_band_urdf/
+│   └── urdf/ xml/ meshes/
+├── config/                                 # 示例零偏 YAML
+├── launch/ros2_upper_body_hardware.launch.py
+└── test/test_hard_stop_calibration.py
+```
+
+配套 `src/crb_ros_msg/` 提供 `UpperJointData.msg`，是本包的一般依赖
+（`depend` 于 `package.xml`）。
+
+### 交叉编译（docker_env）
+
+工作区根目录的 `docker_env/build.sh` 对 `colcon build --merge-install` 做了封装：
+无顶层 `CMakeLists.txt` 时自动按 colcon 工作区处理。x86 开发机：
+
+```bash
+./docker_env/docker_load_x86_aarch64.sh x86
+./docker_env/build.sh x86
+```
+
+aarch64（目标机，Jetson/Orin）：
+
+```bash
+./docker_env/docker_load_x86_aarch64.sh aarch64
+./docker_env/build.sh aarch64
+```
+
+产物分别在 `install_x86/`、`install_aarch64/`，同名 `install/` 符号链接指向
+当前架构版本。
+
+### 运行入口（ros2 run）
+
+```bash
+source install/setup.bash   # 或 install_x86/setup.bash / install_aarch64/setup.bash
+
+# 1) 仅打印左臂校准计划（纯规划，无 ROS/MuJoCo 依赖）
+ros2 run zero_offset_calibration hard_stop_calibration --arm left --print-plan \
+    --urdf $(ros2 pkg prefix zero_offset_calibration)/share/zero_offset_calibration/casbot_band_urdf/urdf/CASBOT02_ENCOS_7dof_shell_20251015_P1L_bass.urdf
+
+# 2) MuJoCo 仿真标定（需 x86 开发机 + mujoco、numpy）
+ros2 run zero_offset_calibration mujoco_hard_stop_calibration --arm both \
+    --out /tmp/zero_offsets_mujoco.yaml
+
+# 3) ROS 2 真机标定 — bass 乐器（默认）
+ros2 run zero_offset_calibration ros2_upper_body_hardware --arm right --persist \
+    --skip-on-timeout
+
+# 4) ROS 2 真机标定 — guitar 乐器（--instrument 同时决定 URDF 和避障姿态）
+ros2 run zero_offset_calibration ros2_upper_body_hardware --arm right --persist \
+    --skip-on-timeout --instrument guitar
+
+# 5) 或用 launch
+ros2 launch zero_offset_calibration ros2_upper_body_hardware.launch.py \
+    arm:=right persist:=true skip_on_timeout:=true instrument:=bass
+```
+
+#### `--instrument` 参数
+
+`--instrument` 同时决定**默认加载的 URDF** 和**标定过程中的避障姿态**：
+
+| `--instrument` | 默认 URDF | 避障姿态 |
+|---|---|---|
+| **bass**（默认） | `…_P1L_bass.urdf` | bass 高抬臂 |
+| **guitar** | `…_P1L_guitar.urdf` | guitar 高抬臂 |
+| auto | 沿用 `--urdf` 指定的文件名自动识别 | 自动 |
+| none | bass URDF | 裸机（不避障） |
+| keyboard | bass URDF | guitar 高抬臂 |
+
+显式传 `--urdf <path>` 会覆盖 `--instrument` 的自动 URDF 选择。
+
+#### `--skip-on-timeout`
+
+启用后，某个关节在标定过程中任一阶段（`move_to_pose` 到位、搜索超时、卡滞早停）
+发生 `TimeoutError` 时，该关节被**跳过**并继续下一个关节，而不会中止整臂标定。
+跑完后日志最终会 `WARN` 列出被跳过的关节，成功标定的关节仍正常写入 YAML。
+
+#### 判停参数默认值
+
+真机 ROS 2 入口的默认判停阈值较仿真放宽（velocity_epsilon 0.08、
+position_window 0.012 rad、stall_time 0.50 s、超时 20 s、min_current_ratio 0.10），
+全部可通过 CLI 覆盖；搜索循环每 2 s 打印一行诊断，直观显示哪个条件未达标。
+
+---
+
 # 机器人手臂硬限位零偏校准说明
 
 本仓库原先只有 `URDF/XML` 资产，没有控制或校准程序。现在新增了 `hard_stop_calibration.py`，用于两件事：
@@ -67,6 +165,25 @@
 offset = reference_angle - encoder_sign * encoder_position
 ```
 
+### URDF 关节限位（实测值）
+
+`CASBOT02_ENCOS_7dof_shell_20251015_P1L_bass.urdf` 中左右臂 14 个关节的限位已按真机实测值更新，左右臂对称：
+
+| 关节 | lower (rad) | upper (rad) |
+|------|-------------|-------------|
+| `*_shoulder_pitch_joint` | -3.22886 | 1.60570 |
+| `left_shoulder_roll_joint` | -0.34906585 | 3.14159265 |
+| `right_shoulder_roll_joint` | -3.14159265 | 0.34906585 |
+| `*_shoulder_yaw_joint` | -1.57079633 | 1.57079633 |
+| `*_elbow_pitch_joint` | -2.26893 | 0.34907 |
+| `*_wrist_yaw_joint` | -1.57079633 | 1.57079633 |
+| `*_wrist_pitch_joint` | -1.04719755 | 1.04719755 |
+| `left_wrist_roll_joint` | -1.57079633 | 1.04719755 |
+| `right_wrist_roll_joint` | -1.04719755 | 1.57079633 |
+
+> **注意**：`elbow_pitch` 的 `upper=0.34907` 需要驱动软限位已放开至该值。如果驱动侧
+> 仍锁在旧限位（如 upper≈0），`move_to_pose` 会因无法到达 approach 角度而超时。
+
 ### 前提假设
 
 1. **硬限位与模型一致**：物理硬停位置必须与 URDF `<limit lower="..." upper="..."/>` 中的值吻合。若存在缓冲垫、弹性止挡等软因素，需要在 `stop_angle` 中补偿。
@@ -112,18 +229,31 @@ holding pose 因目标关节不同而变化——例如标定 shoulder_roll 时 
 
 #### ④ detect — 滑动窗口判停
 
-硬限位检测使用一个**固定时间窗口**（`stall_time_seconds`，默认 0.12–0.20 s）内的采样历史，需要**同时满足**以下 4 个条件才判定已顶到硬停：
+硬限位检测使用一个**固定时间窗口**（`stall_time_seconds`）内的采样历史，需要满足**运动学条件**（全部 AND）加上**到位确认**条件才判定已顶到硬停：
 
 ```
-判停条件 = 时间充足 ∧ 位置稳定 ∧ 速度为零 ∧ 电流达标
+判停条件 = 时间充足 ∧ 位置稳定 ∧ 速度为零 ∧ 电流达标 ∧ 行程足够
+           ∧ (几何近邻 ∨ 动态力矩增量)      ← 两条到位证据任一通过即可
 ```
+
+**运动学条件**（必须全部满足）：
+
+| 条件 | 公式 | 仿真默认 | 真机默认 | 含义 |
+|------|------|---------|---------|------|
+| 时间充足 | t_newest − t_oldest ≥ stall_time × 0.98 | 0.20 s | 0.50 s | 窗口已收集了足够长的数据 |
+| 位置稳定 | \|e_newest − e_oldest\| ≤ ε_pos | 0.003 rad | 0.012 rad | 编码器在窗口内几乎没动 |
+| 速度为零 | \|v_newest\| ≤ ε_vel | 0.015 rad/s | 0.08 rad/s | 当前估计角速度接近零 |
+| 电流达标 | \|I_newest\| ≥ I_threshold × ratio | ratio=0.30 | ratio=0.10 | 电机电流表明关节在承受负载；阈值≤0 时跳过 |
+| 行程足够 | \|pos − start\| ≥ min_search_travel | 0.0 (关闭) | 0.08 rad | 防止还没推动关节就被判停 |
+
+**到位确认条件**（两条都开启时为 OR——任一通过即可）：
 
 | 条件 | 公式 | 默认阈值 | 含义 |
 |------|------|---------|------|
-| 时间充足 | t_newest − t_oldest ≥ stall_time × 0.98 | 0.12 s | 窗口已经收集了足够长的数据 |
-| 位置稳定 | \|e_newest − e_oldest\| ≤ ε_pos | 0.015 rad | 编码器在窗口内几乎没动 |
-| 速度为零 | \|v_newest\| ≤ ε_vel | 0.2 rad/s | 当前估计角速度接近零 |
-| 电流达标 | \|I_newest\| ≥ I_threshold × ratio | ratio=0.08 | 电机电流表明关节在承受负载（非空载停转） |
+| 几何近邻 | \|sign × enc − stop_angle\| ≤ max_expected_offset | 0.60 rad | 判停位置在 stop_angle 附近 |
+| 动态力矩增量 | \|effort\| ≥ baseline + effort_rise_nm | 0.15 Nm | 力矩相比自由运动上升（仅 current_threshold≤0 时启用） |
+
+几何近邻和动态力矩增量采用 **OR** 逻辑：在 torque-damping 搜索模式下，撞到限位后驱动力矩可能回落到低于自由运动基线，effort_rise 条件不成立，但几何上已经紧贴 stop_angle（dist2stop < 10 mrad），此时仅靠几何近邻即可确认到位。反之，如果 URDF stop_angle 标注偏差较大导致几何超标，但力矩增量明确，也接受。
 
 滑动窗口的实现：每次采样后剔除窗口之外的旧样本，保留最近 `stall_time_seconds` 内的数据。这比固定采样数更鲁棒——不依赖采样周期。
 
@@ -168,20 +298,28 @@ while True:
 
 ### 关键参数及其物理意义
 
-| 参数 | 默认值 | 作用 | 调整建议 |
-|------|--------|------|---------|
-| `stop_angle` | URDF 上/下限 | 硬限位参考角度 | 若有缓冲垫需修正 |
-| `approach_angle` | stop − 0.20 rad | 搜索起始位置 | 不宜太远（浪费时间）也不宜太近（可能误判） |
-| `backoff_angle` | stop − 0.06 rad | 卸力位置 | 大于碰撞体回弹距离即可 |
-| `search_velocity` | ±0.05–0.20 rad/s | 速度模式搜索速度 | 太快容易冲过，太慢浪费时间 |
-| `torque_search_nm` | 8.0 N·m | 力矩模式恒力矩 | 需大于关节摩擦+重力矩，但不可过大 |
-| `torque_damping_nm_s` | 3.0 N·m·s/rad | 力矩模式阻尼系数 | 越大越柔，但响应越慢 |
-| `stall_time_seconds` | 0.12 s | 判停窗口长度 | 增大提高稳定性但增加时间 |
-| `position_window_epsilon` | 0.015 rad | 窗口内位置变化阈值 | 编码器噪声大则增大 |
-| `velocity_epsilon` | 0.2 rad/s | 速度判零阈值 | 与估算精度匹配 |
-| `min_current_ratio` | 0.08 | 电流达标比例 | 空载电流大则增大 |
-| `current_thresholds` | 0.35 A (仿真) | 各关节电流门限 | 实机需实测确定 |
-| `encoder_signs` | +1 (仿真) | 编码器方向符号 | 必须根据实机确认 |
+| 参数 | 仿真默认 | 真机默认 | 作用 | 调整建议 |
+|------|---------|---------|------|---------|
+| `stop_angle` | URDF 上/下限 | URDF 上/下限（已按实测更新） | 硬限位参考角度 | 若有缓冲垫需修正 |
+| `approach_angle` | stop − 0.20 rad | 同左 | 搜索起始位置 | 不宜太远（浪费时间）也不宜太近（可能误判） |
+| `backoff_angle` | stop − 0.06 rad | 同左 | 卸力位置 | 大于碰撞体回弹距离即可 |
+| `search_velocity` | ±0.05–0.20 rad/s | 同左 | 速度模式搜索速度 | 太快容易冲过，太慢浪费时间 |
+| `torque_search_nm` | 8.0 N·m | 8.0 N·m | 力矩模式恒力矩 | 需大于关节摩擦+重力矩，但不可过大 |
+| `torque_damping_nm_s` | 3.0 N·m·s/rad | 3.0 N·m·s/rad | 力矩模式阻尼系数 | 越大越柔，但响应越慢 |
+| `stall_time_seconds` | 0.20 s | 0.50 s | 判停窗口长度 | 增大提高稳定性但增加时间 |
+| `position_window_epsilon` | 0.003 rad | 0.012 rad | 窗口内位置变化阈值 | 编码器噪声大则增大 |
+| `velocity_epsilon` | 0.015 rad/s | 0.08 rad/s | 速度判零阈值 | 与估算精度匹配 |
+| `min_current_ratio` | 0.30 | 0.10 | 电流达标比例 | 空载电流大则增大 |
+| `min_search_travel` | 0.0 (关闭) | 0.08 rad | 最小搜索行程 | 防止 approach 点直接误判 |
+| `max_expected_offset` | 0.0 (关闭) | 0.60 rad | 几何近邻门限 | 手腕等机械回差大的关节可适当调大 |
+| `effort_rise_nm` | 0.0 (关闭) | 0.15 Nm | 动态力矩增量门限 | 仅 current_threshold≤0 时启用 |
+| `stuck_abort_seconds` | 0.0 (关闭) | 4.0 s | 卡滞早停时长 | 卡在中途时比超时更快失败 |
+| `sample_timeout_seconds` | 10.0 s | 20.0 s | 单关节搜索超时 | 配合 `--skip-on-timeout` 使用 |
+| `current_thresholds` | 0.35 A | 5.0 / 0.0 (腕) | 各关节电流门限 | 实机需实测；腕关节默认 0.0 禁用绝对电流判据 |
+| `encoder_signs` | +1 | +1 | 编码器方向符号 | 必须根据实机确认 |
+| `move_timeout_s` | — | 15.0 s | `move_to_pose` 总超时 | 配合 stuck 检测使用 |
+| `move_stuck_window_s` | — | 3.0 s | `move_to_pose` 无进度窗口 | 窗口内位置变化 < epsilon 即判定卡死 |
+| `move_stuck_epsilon` | — | 0.010 rad | `move_to_pose` 无进度门限 | — |
 
 ### 仿真与真机的差异
 
@@ -259,7 +397,7 @@ MuJoCo 仿真中大幅度姿态过渡采用分段 waypoint 策略，避免同步
 
 ```bash
 python3 hard_stop_calibration.py \
-  --urdf casbot_band_urdf/urdf/CASBOT02_ENCOS_7dof_shell_20251015_P1L_guitar.urdf \
+  --urdf casbot_band_urdf/urdf/CASBOT02_ENCOS_7dof_shell_20251015_P1L_bass.urdf \
   --arm left \
   --print-plan
 ```
@@ -312,8 +450,14 @@ python3 mujoco_hard_stop_calibration.py --arm both --print-plan
 **零偏落盘**：该节未提供零偏专用写入接口。`--persist` 时用 `write_zero_offsets_yaml()` 将测算的零偏写入 `zero_offsets.yaml`（**标准 YAML**，不依赖安装 PyYAML），供电驱或内部参数服务消费。
 
 ```bash
-python3 ros2_upper_body_hardware.py --arm right --print-plan-only
-python3 ros2_upper_body_hardware.py --arm right --persist
+# 打印计划
+ros2 run zero_offset_calibration ros2_upper_body_hardware --arm right --print-plan-only
+
+# 真机标定（bass 乐器，默认）
+ros2 run zero_offset_calibration ros2_upper_body_hardware --arm right --persist --skip-on-timeout
+
+# 真机标定（guitar 乐器）
+ros2 run zero_offset_calibration ros2_upper_body_hardware --arm right --persist --skip-on-timeout --instrument guitar
 ```
 
 ## MuJoCo 仿真标定
@@ -398,10 +542,9 @@ python3 mujoco_hard_stop_calibration.py --arm both --visualize --viewer-sync-eve
 
 #### 乐器自动检测与碰撞 primitive 注册
 
-系统通过两种方式自动推断乐器类型（`_detect_instrument()`）：
-
-1. **mesh 名检测**：`waist_yaw_link` 引用的 mesh 文件名含 `guitar` 或 `bass` → 对应接触类乐器。
-2. **独立 body 检测**：worldbody 中存在名为 `keyboard` 的独立 body → 电子琴。
+与真机 ``--urdf`` 规则一致，按 **模型 XML 文件名的 stem 后缀** 推断（见
+`hard_stop_calibration.detect_instrument_from_xml_path`）：``*_bass.xml``、``*_guitar.xml``、
+``*_keyboard.xml`` 或裸机（无上述后缀）。不再根据 mesh 名或 worldbody 中的 body 名推断。
 
 对于 guitar/bass（接触类），**删除**原始 mesh collider（MuJoCo 凸包远大于真实轮廓），然后注入对应的 box primitive：
 
@@ -436,9 +579,9 @@ python3 mujoco_hard_stop_calibration.py --arm both --visualize --viewer-sync-eve
 
 电子琴模型与 guitar/bass 不同：琴体以独立 body（含数十个琴键铰链关节和 box 几何体）放置在 worldbody 中，而非融入 `waist_yaw_link` 的 mesh。由于电子琴距机器人较远（约 0.5 m），手臂标定轨迹不会接触琴体，因此：
 
-- **编译期剥离**：`load_model_with_collision_filter()` 检测到 keyboard body 后整体删除，消除 52 个多余 DOF 和 ~88 个多余 geom，物理步进和渲染性能回到 bare 水平。
+- **编译期可选剥离**：`load_model_with_collision_filter(strip_standalone_instruments=…)` 默认在**无头且未录像**时删除 `keyboard` 子树以提速；使用 `--visualize` 或 `--record` 时**不再剥离**，电子琴会出现在画面/视频里。无头又需要看到琴体时可加 `--keep-keyboard`；若要在可视化时仍剥离（省算力）用 `--strip-keyboard`。
 - **求解器重置**：keyboard XML 含有为琴键接触优化的重型求解器设置（`implicitfast`, `cone=elliptic`, `tolerance=1e-9`, `iterations=150`），标定不需要，一律重置为 Euler + pyramidal 默认值。
-- **标定姿态**：使用 bare（无乐器）的 neutral / hold pose，不触发乐器感知的高抬臂路径。
+- **标定姿态**：`keyboard` 在规划上归一为 guitar 高抬臂避障（`plan_instrument=guitar`），与实机电子琴在身前一致。
 
 ### 扩展新乐器
 

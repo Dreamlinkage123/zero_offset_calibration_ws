@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>zero_offset_calibration</name>
+  <version>0.1.0</version>
+  <description>
+    CASBOT 上半身硬限位零偏校准：包含规划/运行时核心库、MuJoCo 仿真适配器，
+    以及基于 /motion/upper_body_debug + UpperJointData 的 ROS 2 真机适配器。
+  </description>
+  <maintainer email="casbot@todo.todo">CASBOT Team</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>crb_ros_msg</depend>
+
+  <exec_depend>ament_index_python</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

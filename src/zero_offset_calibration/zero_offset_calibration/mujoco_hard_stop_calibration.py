@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """在 MuJoCo 中复现上身硬限位零偏标定流程（与 `hard_stop_calibration.HardStopCalibrator` 对接）。
 
-支持仓库内 `casbot_band_urdf/xml/` 下的多种模型（bare/guitar/bass），自动检测乐器
-类型并生成对应的碰撞 primitive 和避障姿态。
+支持仓库内 `casbot_band_urdf/xml/` 下的多种模型（bare/guitar/bass/keyboard），按 **XML
+文件名 stem 后缀**（与真机 URDF 命名一致：``*_bass`` / ``*_guitar`` / ``*_keyboard``）推断
+乐器类型，并生成对应的碰撞 primitive 和避障姿态。
 该模型腿部关节无执行器，逐仿真步将腿关节位姿/速度锁回初值，避免全身垮塌。
 
 `read_sample` 使用**仿真时间**作为 `JointSample.timestamp`（与 `m.opt.timestep` 累加），以便
@@ -36,12 +37,18 @@ from hard_stop_calibration import (
     HardStopDetectorConfig,
     JointLimit,
     JointSample,
+    REST_ROLL_RAD,
     arm_joint_names,
+    arm_reset_waypoints,
+    arm_rest_pose,
+    arm_setup_waypoints,
     build_default_arm_calibration_plan,
+    detect_instrument_from_xml_path,
     parse_joint_limits,
     plan_summary,
     write_zero_offsets_yaml,
 )
+from _paths import default_urdf_path, default_xml_path
 
 
 def _jnt_name(m: mujoco.MjModel, j: int) -> str:
@@ -63,7 +70,8 @@ ARM_COLLISION_BIT = 1
 BODY_COLLISION_BIT = 2
 
 # 双臂自然下垂会与大腿干涉，rest pose 让 shoulder_roll 外展 10°（≈0.175 rad）
-_REST_ROLL_RAD = 0.175
+# 真值定义在 hard_stop_calibration.REST_ROLL_RAD，本模块保留同名别名以便外部沿用。
+_REST_ROLL_RAD = REST_ROLL_RAD
 
 BODY_COLLISION_LINKS = (
     "waist_yaw_link",
@@ -110,38 +118,30 @@ _CONTACT_INSTRUMENTS = frozenset({"guitar", "bass"})
 _STANDALONE_INSTRUMENT_BODIES = frozenset({"keyboard"})
 
 
-def _detect_instrument(spec: "mujoco.MjSpec") -> str:
-    """推断 XML 中的乐器类型：guitar / bass / keyboard / ""。
-
-    1. waist_yaw_link mesh 名含 guitar/bass → 对应碰撞体需替换。
-    2. worldbody 直接子 body 名为 keyboard → 独立乐器，标定时整体剥离。
-    """
-    for g in spec.geoms:
-        parent = g.parent
-        if parent is not None and parent.name == "waist_yaw_link":
-            mesh_name = g.meshname if hasattr(g, "meshname") else ""
-            if not mesh_name:
-                try:
-                    mesh_name = g.mesh.name if g.mesh is not None else ""
-                except Exception:
-                    mesh_name = ""
-            for suffix in _INSTRUMENT_COLLIDERS:
-                if suffix in mesh_name:
-                    return suffix
-    for b in spec.bodies:
-        if b.name in _STANDALONE_INSTRUMENT_BODIES:
-            return b.name
-    return ""
-
-
-def load_model_with_collision_filter(xml_path: Path, arm: str) -> "mujoco.MjModel":
+def load_model_with_collision_filter(
+    xml_path: Path,
+    arm: str,
+    *,
+    strip_standalone_instruments: bool = True,
+) -> "mujoco.MjModel":
     """用 MjSpec 在编译期重写 contype/conaffinity，打开"本侧手臂远端 ↔ 躯干/乐器
     代理体"的碰撞。
 
     设计要点：
-    - 自动从 XML 中检测乐器类型（guitar / bass / keyboard / 空）。
-    - 独立乐器 body（如 keyboard）整体剥离——它们的关节/geom 与标定无关，额外
-      DOF 和 geom 会拖慢物理与渲染。
+    - 按 ``xml_path`` 的 **文件名 stem** 判定乐器（与
+      :func:`hard_stop_calibration.detect_instrument_from_xml_path`、真机 ``--urdf`` 一致）：
+      ``*_guitar`` / ``*_bass`` / ``*_keyboard`` 或裸机无后缀；不再解析 mesh 名或
+      worldbody 结构。
+    - 独立乐器 body（电子琴 ``keyboard`` 子树，仅 ``*_keyboard.xml`` 有）：无头标定可设
+      ``strip_standalone_instruments=True`` 整棵删除，减少 DOF/geom、加快步进。交互
+      可视化或录像时应设 ``False``，否则视图中**看不到电子琴**；保留时琴键 hinge 由
+      :meth:`MujocoArmCalibrationHardware._setup_passive_locks` 锁死，避免 52 个被动
+      hinge 进入物理/渲染循环把每步 wall-clock 拉成"机器人不动"的卡顿感。
+    - **强制清零 group=1 visual mesh 的 contype/conaffinity**：``*_keyboard.xml`` 在
+      手腕/手指的 visual mesh 上误设了 ``contype="2" conaffinity="1"``，与本过滤器为
+      collision mesh 配的 (1,2) 形成 arm↔body 互配，导致同一手臂相邻 link 之间从静
+      止位姿就持续接触（``ncon`` 启动即非零），手臂自我卡死，wrist 系列关节标定永
+      远到不了限位。
     - XML 中可能含有针对乐器接触的重型求解器设置（implicitfast, cone=elliptic,
       tolerance=1e-9 等），标定不需要，一律重置为 Euler + pyramidal 默认值。
     - waist_yaw_link 的原始 mesh collider 总是被删除——MuJoCo 对合并了乐器的 STL
@@ -152,14 +152,15 @@ def load_model_with_collision_filter(xml_path: Path, arm: str) -> "mujoco.MjMode
       因此必须在 MjSpec 上修改再编译。
     """
     spec = mujoco.MjSpec.from_file(str(xml_path.resolve()))
-    instrument = _detect_instrument(spec)
+    instrument = detect_instrument_from_xml_path(xml_path)
 
-    # --- 剥离独立乐器 body（如电子琴的琴键 body-tree） ---
+    # --- 可选：剥离独立乐器 body（如电子琴的琴键 body-tree） ---
     n_stripped = 0
-    for b in list(spec.bodies):
-        if b.name in _STANDALONE_INSTRUMENT_BODIES:
-            spec.delete(b)
-            n_stripped += 1
+    if strip_standalone_instruments:
+        for b in list(spec.bodies):
+            if b.name in _STANDALONE_INSTRUMENT_BODIES:
+                spec.delete(b)
+                n_stripped += 1
     # --- 重置求解器为快速默认值 ---
     spec.option.integrator = 0    # Euler
     spec.option.cone = 0          # pyramidal
@@ -176,10 +177,18 @@ def load_model_with_collision_filter(xml_path: Path, arm: str) -> "mujoco.MjMode
     n_body = 0
     waist_body = None
     for g in list(spec.geoms):
-        if int(g.group) == 1:
-            continue
         parent = g.parent
         bname = parent.name if parent is not None else ""
+        # Visual meshes (group=1) must NEVER participate in collision. 某些 XML（如
+        # *_keyboard.xml）在手腕/手指的 visual mesh 上误设了 contype="2" conaffinity="1"，
+        # 与本过滤器为 collision mesh 配的 (1,2) 形成 arm↔body 互配，导致同一手臂相邻
+        # link 之间从静止位姿就持续接触：移动、力矩搜索都被自身碰撞顶住，wrist 系列
+        # 关节永远到不了限位（标定 6/7 处 timeout）。这里强制清零，让 group=1 始终纯
+        # 视觉无碰撞。
+        if int(g.group) == 1:
+            g.contype = 0
+            g.conaffinity = 0
+            continue
         if bname == "waist_yaw_link":
             waist_body = parent
             spec.delete(g)
@@ -351,7 +360,8 @@ class MujocoArmCalibrationHardware:
         self._sim_time = 0.0
         self._q_des: Dict[str, float] = {}
         self._actuator_is_motor: Dict[str, bool] = {}
-        self._leg_lock: List[tuple[int, int, float]] = []  # (qpos_adr, dof_adr, q0)
+        # (qpos_adr, dof_adr, q0) — 双腿 + 保留的独立乐器子树（如 keyboard 琴键）
+        self._leg_lock: List[tuple[int, int, float]] = []
         self._tau_adr: Dict[str, int] = {}
         self._qpos_adr: Dict[str, int] = {}
         self._dof_adr: Dict[str, int] = {}
@@ -389,16 +399,37 @@ class MujocoArmCalibrationHardware:
 
         if reset_data:
             mujoco.mj_resetData(m, d)
-        self._setup_leg_lock()
+        self._setup_passive_locks()
         self._capture_initial_q_des()
         self._stabilize_idle()
 
-    def _setup_leg_lock(self) -> None:
+    def _is_descendant_of_standalone_instrument(self, body_id: int) -> bool:
+        # 顺着 body_parentid 走到 worldbody (id=0)，若途经任何 _STANDALONE_INSTRUMENT_BODIES
+        # 就视为"独立乐器子树"——例如 keyboard 子树下的 88 个琴键 hinge。
+        m = self.m
+        cur = int(body_id)
+        while cur > 0:
+            bn = mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, cur) or ""
+            if bn in _STANDALONE_INSTRUMENT_BODIES:
+                return True
+            cur = int(m.body_parentid[cur])
+        return False
+
+    def _setup_passive_locks(self) -> None:
+        # 锁定标定不关心、但会被 mj_step 拖慢的被动 DOF：
+        # (1) 双腿——避免机器人因重力坐倒；
+        # (2) 保留下来的独立乐器子树（如 *_keyboard.xml 的琴键 hinge）——一旦保留以便可视
+        #     化，琴键的几十个 hinge 会进入物理/渲染循环，导致每步 wall-clock 暴涨，肉眼
+        #     看上去"机器人不动"。这里把它们当作刚体锁死，琴键画面静止但不影响视觉。
         m, d = self.m, self.d
         self._leg_lock = []
         for j in range(m.njnt):
-            jn = _jnt_name(m, j)
-            if not jn.startswith(("left_leg_", "right_leg_")):
+            jn = _jnt_name(m, j) or ""
+            is_leg = jn.startswith(("left_leg_", "right_leg_"))
+            is_passive_instrument = self._is_descendant_of_standalone_instrument(
+                int(m.jnt_bodyid[j])
+            )
+            if not (is_leg or is_passive_instrument):
                 continue
             qad = m.jnt_qposadr[j]
             dof = m.jnt_dofadr[j]
@@ -608,13 +639,8 @@ class MujocoArmCalibrationHardware:
 
 
 def _arm_rest_pose(arm: str) -> Dict[str, float]:
-    """双臂下垂但 roll 外展 10° 避开大腿的 rest pose。"""
-    sign = 1.0 if arm == "left" else -1.0
-    rest: Dict[str, float] = {}
-    for j in arm_joint_names(arm):
-        rest[j] = 0.0
-    rest[f"{arm}_shoulder_roll_joint"] = sign * _REST_ROLL_RAD
-    return rest
+    """双臂下垂但 roll 外展 10° 避开大腿的 rest pose（薄包装，转发到 hard_stop_calibration）。"""
+    return arm_rest_pose(arm)
 
 
 def _set_neutral_and_settle(
@@ -625,16 +651,12 @@ def _set_neutral_and_settle(
 ) -> None:
     """先到中性/展臂等初始姿态，使用与标定相同的速度上限，避免开局瞬间甩臂穿模。
 
-    当有乐器时手臂 neutral 需要很高的 shoulder_pitch (如 -2.5) 和大 roll (如 1.2)，
-    直接一步到位会让前臂扫过乐器。waypoint 策略："先展后抬"——
-      WP1: 先把 roll 展到 neutral 值（手臂外展，清开乐器琴身），pitch/elbow 保持 rest
-      WP2: 再把 pitch 抬到 neutral 值（手臂已外展，避开琴身和琴颈）
-      最后: 移动到完整 neutral（含 elbow 弯曲等）
+    waypoint 拓扑由 :func:`hard_stop_calibration.arm_setup_waypoints` 统一给出
+    （"先展后抬"），仿真侧仅负责把"对侧手臂 rest + 头/腰锁零"的 ``base`` 合并到
+    每个 waypoint 上，并在每段过渡后 settle 不同的物理步数让 PD 收敛。
     """
-    neutral: Dict[str, float] = dict(plan.neutral_pose)
-    rest = _arm_rest_pose(arm)
     other_arm = "left" if arm == "right" else "right"
-    other_rest = _arm_rest_pose(other_arm)
+    other_rest = arm_rest_pose(other_arm)
     base: Dict[str, float] = {}
     for j in arm_joint_names(other_arm):
         if j in hardware._q_des:
@@ -643,44 +665,22 @@ def _set_neutral_and_settle(
         if name in hardware._q_des:
             base[name] = 0.0
 
-    sp_key = f"{arm}_shoulder_pitch_joint"
-    sr_key = f"{arm}_shoulder_roll_joint"
-    ep_key = f"{arm}_elbow_pitch_joint"
-    target_pitch = neutral.get(sp_key, 0.0)
-    target_roll = neutral.get(sr_key, 0.0)
-    needs_waypoint = abs(target_pitch) > 1.5
-
-    # 先到 rest pose（下垂外展 10°，避开大腿）
     rest_full = dict(base)
-    rest_full.update(rest)
+    rest_full.update(arm_rest_pose(arm))
     hardware.move_to_pose(rest_full, speed_scale=speed_scale)
     for _ in range(max(hardware.cfg.settle_steps, 20)):
         hardware._step_physics()
 
-    if needs_waypoint:
-        # WP1: 展 roll 到 neutral 值，pitch/elbow 保持 rest
-        wp1 = dict(base)
-        wp1.update(neutral)
-        wp1[sp_key] = 0.0
-        wp1[ep_key] = 0.0
-        wp1[sr_key] = target_roll
-        hardware.move_to_pose(wp1, speed_scale=speed_scale)
-        for _ in range(max(hardware.cfg.settle_steps, 30)):
+    waypoints = arm_setup_waypoints(arm, plan.neutral_pose)
+    last_idx = len(waypoints) - 1
+    for i, wp in enumerate(waypoints):
+        full = dict(base)
+        full.update(wp)
+        hardware.move_to_pose(full, speed_scale=speed_scale)
+        # 中间 waypoint 给 30 步过阻尼，终点（完整 neutral）给 60 步
+        n_settle = 60 if i == last_idx else 30
+        for _ in range(max(hardware.cfg.settle_steps, n_settle)):
             hardware._step_physics()
-
-        # WP2: 抬 pitch（手臂已外展，安全绕过乐器），elbow 仍为 0
-        wp2 = dict(base)
-        wp2.update(neutral)
-        wp2[ep_key] = 0.0
-        hardware.move_to_pose(wp2, speed_scale=speed_scale)
-        for _ in range(max(hardware.cfg.settle_steps, 30)):
-            hardware._step_physics()
-
-    pose = dict(base)
-    pose.update(neutral)
-    hardware.move_to_pose(pose, speed_scale=speed_scale)
-    for _ in range(max(hardware.cfg.settle_steps, 60)):
-        hardware._step_physics()
 
 
 def _reset_arm(
@@ -691,24 +691,9 @@ def _reset_arm(
     pose_speed_scale: float,
 ) -> None:
     """沿 setup 的逆序 waypoint 安全回到 rest pose（下垂外展 10°，避开大腿）。"""
-    neutral = dict(plan.neutral_pose)
-    rest = _arm_rest_pose(arm)
-    sp_key = f"{arm}_shoulder_pitch_joint"
-    sr_key = f"{arm}_shoulder_roll_joint"
-    needs_waypoint = instrument and abs(neutral.get(sp_key, 0.0)) > 1.5
-
-    if needs_waypoint:
-        target_roll = neutral.get(sr_key, 0.0)
-        # 1) 回到 neutral（从最后一步的任意 hold pose 回到已知安全姿态）
-        hw.move_to_pose(neutral, speed_scale=pose_speed_scale)
-        # 2) pitch 降到 0，roll 保持外展
-        rw2 = dict(rest)
-        rw2[sr_key] = target_roll
-        hw.move_to_pose(rw2, speed_scale=pose_speed_scale)
-        # 3) roll 收回 rest 值
-        hw.move_to_pose(rest, speed_scale=pose_speed_scale)
-    else:
-        hw.move_to_pose(rest, speed_scale=pose_speed_scale)
+    waypoints = arm_reset_waypoints(arm, plan.neutral_pose, instrument=instrument)
+    for wp in waypoints:
+        hw.move_to_pose(wp, speed_scale=pose_speed_scale)
     hw.sleep(0.3)
     print("[%s] 手臂已复位" % arm)
 
@@ -720,6 +705,7 @@ def run_calibration(
     out_yaml: Path,
     encoder_bias: Optional[Dict[str, float]] = None,
     *,
+    strip_standalone_instruments: Optional[bool] = None,
     visualize: bool = False,
     record_path: Optional[Path] = None,
     record_fps: int = 30,
@@ -732,14 +718,19 @@ def run_calibration(
     torque_search_nm: float = 8.0,
     torque_damping_nm_s: float = 3.0,
 ) -> Dict[str, float]:
-    spec = mujoco.MjSpec.from_file(str(model_xml.resolve()))
-    instrument = _detect_instrument(spec)
-    del spec
-    # keyboard 虽然琴体已剥离，但实机上电子琴在身前，采用 guitar 的高抬臂轨迹
+    instrument = detect_instrument_from_xml_path(model_xml)
+    # keyboard 虽然可剥离琴体，但实机上电子琴在身前，采用 guitar 的高抬臂轨迹
     _PLAN_INSTRUMENT_MAP = {"keyboard": "guitar"}
     plan_instrument = _PLAN_INSTRUMENT_MAP.get(instrument, instrument if instrument in _CONTACT_INSTRUMENTS else "")
     arms = ["left", "right"] if arm == "both" else [arm]
-    m = load_model_with_collision_filter(model_xml, "both" if arm == "both" else arm)
+    if strip_standalone_instruments is None:
+        # 无头标定：剥离电子琴子树以提速；有窗口/录像时保留，否则看不到 keyboard
+        strip_standalone_instruments = not (visualize or (record_path is not None))
+    m = load_model_with_collision_filter(
+        model_xml,
+        "both" if arm == "both" else arm,
+        strip_standalone_instruments=strip_standalone_instruments,
+    )
     d = mujoco.MjData(m)
     recorder: Optional[_VideoRecorder] = None
     if record_path is not None:
@@ -835,12 +826,12 @@ def main() -> int:
     ap.add_argument(
         "--model-xml",
         type=Path,
-        default=Path("casbot_band_urdf/xml/CASBOT02_ENCOS_7dof_shell_20251015_P1L_guitar.xml"),
+        default=default_xml_path("CASBOT02_ENCOS_7dof_shell_20251015_P1L_bass.xml"),
     )
     ap.add_argument(
         "--urdf",
         type=Path,
-        default=Path("casbot_band_urdf/urdf/CASBOT02_ENCOS_7dof_shell_20251015_P1L_guitar.urdf"),
+        default=default_urdf_path("CASBOT02_ENCOS_7dof_shell_20251015_P1L_bass.urdf"),
     )
     ap.add_argument("--arm", choices=("left", "right", "both"), required=True)
     ap.add_argument("--out", type=Path, default=Path("zero_offsets_mujoco.yaml"))
@@ -854,6 +845,16 @@ def main() -> int:
         "--visualize",
         action="store_true",
         help="用 mujoco.viewer.launch_passive 打开交互窗口，实时看标定过程",
+    )
+    ap.add_argument(
+        "--keep-keyboard",
+        action="store_true",
+        help="无头/无可视化时仍保留 *_keyboard.xml 中的电子琴子树（默认无头会剥离以提速，画面只剩机器人）",
+    )
+    ap.add_argument(
+        "--strip-keyboard",
+        action="store_true",
+        help="即使用 --visualize/--record 也剥离电子琴子树（省算力，画面无琴，仅调试用）",
     )
     ap.add_argument(
         "--record",
@@ -924,12 +925,20 @@ def main() -> int:
     enc_bias: Dict[str, float] = {}
     if args.encoder_bias and args.encoder_bias.is_file():
         enc_bias = {str(k): float(v) for k, v in json.loads(args.encoder_bias.read_text(encoding="utf-8")).items()}
+    if args.keep_keyboard and args.strip_keyboard:
+        ap.error("不能同时使用 --keep-keyboard 与 --strip-keyboard")
+    strip_opt: Optional[bool] = None
+    if args.keep_keyboard:
+        strip_opt = False
+    elif args.strip_keyboard:
+        strip_opt = True
     run_calibration(
         model_xml=args.model_xml,
         urdf_path=args.urdf,
         arm=args.arm,
         out_yaml=args.out,
         encoder_bias=enc_bias,
+        strip_standalone_instruments=strip_opt,
         visualize=bool(args.visualize),
         record_path=args.record,
         record_fps=max(1, int(args.record_fps)),
