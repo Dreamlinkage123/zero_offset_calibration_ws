@@ -251,10 +251,147 @@ class CalibrationProcess:
 
 
 # ---------------------------------------------------------------------------
+# Action playback manager
+# ---------------------------------------------------------------------------
+
+_ACTION_DATA_CANDIDATES = [
+    Path("/workspace/action_data/data"),
+    Path("src/action_data"),
+]
+
+
+def _find_action_data_dir() -> Path:
+    for d in _ACTION_DATA_CANDIDATES:
+        if d.is_dir():
+            return d
+    return _ACTION_DATA_CANDIDATES[0]
+
+
+class ActionPlaybackManager:
+    """管理动作播放子进程。"""
+
+    def __init__(self) -> None:
+        self._proc: Optional[subprocess.Popen] = None
+        self._lock = threading.RLock()
+        self._status = "idle"  # idle / playing / done / error
+        self._logs: List[str] = []
+
+    def scan_files(self) -> List[str]:
+        d = _find_action_data_dir()
+        if not d.is_dir():
+            return []
+        return sorted(f.name for f in d.glob("*.data"))
+
+    def play(self, filename: str) -> Dict[str, Any]:
+        with self._lock:
+            if self._status == "playing":
+                return {"ok": False, "error": "已有动作在播放中"}
+            d = _find_action_data_dir()
+            filepath = d / filename
+            if not filepath.is_file():
+                return {"ok": False, "error": f"文件不存在: {filepath}"}
+
+            cmd = [
+                "ros2", "run", "zero_offset_calibration", "action_player",
+                "--data", str(filepath), "--no-exit-debug",
+            ]
+            self._logs.clear()
+            self._status = "playing"
+            self._logs.append(f"$ {' '.join(cmd)}")
+            try:
+                self._proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, bufsize=1, preexec_fn=os.setsid,
+                )
+            except Exception as exc:
+                self._status = "error"
+                self._logs.append(f"启动失败: {exc}")
+                return {"ok": False, "error": str(exc)}
+            t = threading.Thread(target=self._read_output, daemon=True)
+            t.start()
+            return {"ok": True}
+
+    def stop(self) -> Dict[str, Any]:
+        with self._lock:
+            proc = self._proc
+            if proc is None or self._status != "playing":
+                return {"ok": True, "message": "未在播放"}
+        self._logs.append("[Web] 正在停止播放...")
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGINT)
+        except (ProcessLookupError, OSError):
+            pass
+        for _ in range(30):
+            if proc.poll() is not None:
+                break
+            time.sleep(0.1)
+        if proc.poll() is None:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                pass
+        with self._lock:
+            self._status = "idle"
+        self._logs.append("[Web] 播放已停止")
+        return {"ok": True}
+
+    def get_state(self) -> Dict[str, Any]:
+        with self._lock:
+            return {"status": self._status, "log_count": len(self._logs)}
+
+    def get_logs(self, since: int = 0) -> Dict[str, Any]:
+        with self._lock:
+            total = len(self._logs)
+            lines = self._logs[since:] if since < total else []
+            return {"lines": lines, "total": total}
+
+    def set_debug_mode(self, enable: bool) -> Dict[str, Any]:
+        data_str = "true" if enable else "false"
+        self._logs.append(f"[Web] 正在{'开启' if enable else '关闭'}上身调试模式...")
+        try:
+            r = subprocess.run(
+                ["ros2", "service", "call", "/motion/upper_body_debug",
+                 "std_srvs/srv/SetBool", "{data: %s}" % data_str],
+                capture_output=True, text=True, timeout=10,
+            )
+            if r.returncode == 0:
+                msg = "上身调试模式已%s" % ("开启" if enable else "关闭")
+                self._logs.append(f"[Web] {msg}")
+                return {"ok": True, "message": msg}
+            else:
+                self._logs.append(f"[Web] 调试模式设置返回码 {r.returncode}")
+                return {"ok": False, "error": f"返回码 {r.returncode}"}
+        except subprocess.TimeoutExpired:
+            self._logs.append("[Web] 调试模式服务超时")
+            return {"ok": False, "error": "服务调用超时"}
+        except Exception as exc:
+            self._logs.append(f"[Web] 调试模式设置失败: {exc}")
+            return {"ok": False, "error": str(exc)}
+
+    def _read_output(self) -> None:
+        proc = self._proc
+        assert proc is not None and proc.stdout is not None
+        try:
+            for raw in proc.stdout:
+                line = _strip_ansi(raw.rstrip("\n"))
+                with self._lock:
+                    if len(self._logs) < _MAX_LOG_LINES:
+                        self._logs.append(line)
+        except Exception:
+            pass
+        finally:
+            rc = proc.wait()
+            with self._lock:
+                if self._status == "playing":
+                    self._status = "done" if rc == 0 else "error"
+
+
+# ---------------------------------------------------------------------------
 # HTTP handler
 # ---------------------------------------------------------------------------
 
 _manager = CalibrationProcess()
+_action_mgr = ActionPlaybackManager()
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
@@ -279,6 +416,20 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                         except ValueError:
                             pass
             self._json(_manager.get_logs(since))
+        elif self.path == "/api/action/files":
+            self._json({"files": _action_mgr.scan_files()})
+        elif self.path == "/api/action/state":
+            self._json(_action_mgr.get_state())
+        elif self.path.startswith("/api/action/logs"):
+            since = 0
+            if "?" in self.path:
+                for part in self.path.split("?", 1)[1].split("&"):
+                    if part.startswith("since="):
+                        try:
+                            since = int(part.split("=", 1)[1])
+                        except ValueError:
+                            pass
+            self._json(_action_mgr.get_logs(since))
         else:
             self.send_error(404)
 
@@ -300,6 +451,17 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self._json(result)
         elif self.path == "/api/reset_offsets":
             result = _manager.reset_offsets()
+            self._json(result)
+        elif self.path == "/api/action/play":
+            body = self._body()
+            result = _action_mgr.play(body.get("file", ""))
+            self._json(result)
+        elif self.path == "/api/action/stop":
+            threading.Thread(target=_action_mgr.stop, daemon=True).start()
+            self._json({"ok": True, "message": "停止请求已提交"})
+        elif self.path == "/api/action/debug":
+            body = self._body()
+            result = _action_mgr.set_debug_mode(bool(body.get("enable", True)))
             self._json(result)
         else:
             self.send_error(404)
@@ -403,6 +565,10 @@ select:focus{outline:2px solid var(--accent);outline-offset:-1px}
 .btn-apply:hover:not(:disabled){background:#7c3aed}
 .btn-reset{background:#64748b;color:#fff}
 .btn-reset:hover:not(:disabled){background:#475569}
+.btn-debug-on{background:#059669;color:#fff}
+.btn-debug-on:hover:not(:disabled){background:#047857}
+.btn-debug-off{background:#dc2626;color:#fff}
+.btn-debug-off:hover:not(:disabled){background:#b91c1c}
 
 .status{display:flex;align-items:center;gap:8px;margin-top:14px;padding:10px 12px;
   background:var(--input);border:1px solid var(--border);border-radius:var(--r);font-size:13px}
@@ -487,6 +653,30 @@ select:focus{outline:2px solid var(--accent);outline-offset:-1px}
         <span id="st">空闲</span>
       </div>
     </div>
+
+    <div class="panel" style="margin-top:16px">
+      <h2>动作播放</h2>
+
+      <div class="btns" style="margin-bottom:12px">
+        <button class="btn btn-debug-on" id="btn-debug-on" onclick="doDebug(true)">开启调试模式</button>
+        <button class="btn btn-debug-off" id="btn-debug-off" onclick="doDebug(false)">关闭调试模式</button>
+      </div>
+
+      <div class="fg">
+        <label for="act-file">选择动作文件</label>
+        <select id="act-file"><option value="">加载中...</option></select>
+      </div>
+
+      <div class="btns">
+        <button class="btn btn-go" id="btn-play" onclick="doPlay()">&#9654; 播放</button>
+        <button class="btn btn-stop" id="btn-play-stop" onclick="doStopPlay()" disabled>&#10005; 停止</button>
+      </div>
+
+      <div class="status">
+        <div class="sd idle" id="act-sd"></div>
+        <span id="act-st">空闲</span>
+      </div>
+    </div>
   </div>
 
   <!-- right: logs -->
@@ -549,19 +739,6 @@ function updUI(s){
   document.querySelectorAll('.fc').forEach(e=>e.disabled=s.status==='running');
 }
 
-async function poll(){
-  try{
-    const s=await fetch('/api/state').then(r=>r.json());
-    updUI(s);
-    lastSt=s.status;
-    if(s.log_count>offset){
-      const d=await fetch('/api/logs?since='+offset).then(r=>r.json());
-      if(d.lines.length) addLines(d.lines);
-      offset=d.total;
-    }
-  }catch(e){console.error(e)}
-  polling=setTimeout(poll, lastSt==='running'?300:1000);
-}
 
 async function doStart(){
   const arm=document.querySelector('input[name=arm]:checked').value;
@@ -603,15 +780,111 @@ async function doApplyOffset(){
   finally{b.disabled=false;b.textContent='\u21BB 应用零偏'}
 }
 
+// -- action playback --
+let actOffset=0, actLastSt='idle';
+const actStMap={idle:'空闲',playing:'播放中',done:'播放完成',error:'播放异常'};
+
+async function loadActionFiles(){
+  try{
+    const r=await fetch('/api/action/files').then(r=>r.json());
+    const sel=$('act-file');
+    sel.innerHTML='';
+    if(r.files.length===0){sel.innerHTML='<option value="">无动作文件</option>';return}
+    for(const f of r.files){
+      const o=document.createElement('option');
+      o.value=f;o.textContent=f;sel.appendChild(o);
+    }
+  }catch(e){console.error(e)}
+}
+
+function addActLines(lines){
+  const el=$('log');
+  const atBot=el.scrollHeight-el.scrollTop-el.clientHeight<40;
+  for(const l of lines){
+    const d=document.createElement('div');
+    d.className='ll '+cls(l);
+    d.textContent=l;
+    el.appendChild(d);
+  }
+  if(atBot) el.scrollTop=el.scrollHeight;
+}
+
+async function pollAction(){
+  try{
+    const s=await fetch('/api/action/state').then(r=>r.json());
+    $('act-sd').className='sd '+(s.status==='playing'?'running':s.status);
+    $('act-st').textContent=actStMap[s.status]||s.status;
+    $('btn-play').disabled=s.status==='playing';
+    $('btn-play-stop').disabled=s.status!=='playing';
+    actLastSt=s.status;
+    if(s.log_count>actOffset){
+      const d=await fetch('/api/action/logs?since='+actOffset).then(r=>r.json());
+      if(d.lines.length) addActLines(d.lines);
+      actOffset=d.total;
+    }
+  }catch(e){console.error(e)}
+}
+
+async function origPoll(){
+  try{
+    const s=await fetch('/api/state').then(r=>r.json());
+    updUI(s);
+    lastSt=s.status;
+    if(s.log_count>offset){
+      const d=await fetch('/api/logs?since='+offset).then(r=>r.json());
+      if(d.lines.length) addLines(d.lines);
+      offset=d.total;
+    }
+  }catch(e){console.error(e)}
+  await pollAction();
+  polling=setTimeout(origPoll, (lastSt==='running'||actLastSt==='playing')?300:1000);
+}
+
+async function doPlay(){
+  const f=$('act-file').value;
+  if(!f){alert('请选择动作文件');return}
+  const r=await fetch('/api/action/play',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({file:f})
+  }).then(r=>r.json());
+  if(!r.ok) alert(r.error||'播放失败');
+}
+
+async function doStopPlay(){
+  await fetch('/api/action/stop',{method:'POST'});
+}
+
+async function doDebug(enable){
+  const b=enable?$('btn-debug-on'):$('btn-debug-off');
+  b.disabled=true;
+  b.textContent='请求中...';
+  try{
+    const r=await fetch('/api/action/debug',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({enable:enable})
+    }).then(r=>r.json());
+    if(!r.ok) alert(r.error||'操作失败');
+  }catch(e){alert('请求失败: '+e)}
+  finally{
+    $('btn-debug-on').disabled=false;
+    $('btn-debug-on').textContent='开启调试模式';
+    $('btn-debug-off').disabled=false;
+    $('btn-debug-off').textContent='关闭调试模式';
+  }
+}
+
 function syncHeight(){
-  const p=document.querySelector('.panel');
-  if(p) document.querySelector('.log-panel').style.setProperty('--panel-h',p.offsetHeight+'px');
+  const panels=document.querySelectorAll('.panel');
+  let h=0;panels.forEach(p=>{h+=p.offsetHeight});
+  h+=16;
+  document.querySelector('.log-panel').style.setProperty('--panel-h',h+'px');
 }
 window.addEventListener('resize',syncHeight);
 document.querySelectorAll('.fc').forEach(e=>e.addEventListener('change',updPreview));
 updPreview();
+loadActionFiles();
 syncHeight();
-poll();
+origPoll();
 </script>
 </body>
 </html>

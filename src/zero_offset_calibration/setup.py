@@ -72,6 +72,8 @@ setup(
             f"ros2_upper_body_hardware = {package_name}.ros2_upper_body_hardware:main",
             # Web 控制台：浏览器操作标定流程
             f"calibration_web_ui = {package_name}.web_ui:main",
+            # 动作数据播放器
+            f"action_player = {package_name}.action_player:main",
         ],
     },
 )
