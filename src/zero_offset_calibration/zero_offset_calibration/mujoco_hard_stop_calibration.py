@@ -16,21 +16,42 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, cast
 
-import os
-import numpy as np
+# mujoco / numpy 仅在 x86 开发机上可用，aarch64 (Orin) 不安装。
+# 延迟到模块体尾部导入，使 setup.py / colcon build 不在 import 阶段报错。
+# 模块级名称 np / mujoco 在 _lazy_init() 中赋值。
+np: Any = None
+mujoco: Any = None  # type: ignore[assignment]
 
-# --record 的离屏渲染需要 GL 后端；无显示器时 GLFW 不可用，回退到 EGL
-if "MUJOCO_GL" not in os.environ and "DISPLAY" not in os.environ:
-    os.environ["MUJOCO_GL"] = "egl"
 
-import mujoco
-import mujoco.viewer
+def _lazy_init() -> None:
+    """首次实际使用前导入 mujoco / numpy，赋给模块级名称。"""
+    global np, mujoco  # noqa: PLW0603
+    if np is not None and mujoco is not None:
+        return
+    try:
+        import numpy as _np
+        # --record 的离屏渲染需要 GL 后端；无显示器时 GLFW 不可用，回退到 EGL
+        if "MUJOCO_GL" not in os.environ and "DISPLAY" not in os.environ:
+            os.environ["MUJOCO_GL"] = "egl"
+        import mujoco as _mj
+        import mujoco.viewer  # noqa: F401 ensure submodule is loadable
+    except ImportError as exc:
+        raise SystemExit(
+            "本模块需要 mujoco 和 numpy（仅 x86 开发机支持）。\n"
+            "在 aarch64 (Orin) 上请使用真机标定入口：\n"
+            "  ros2 run zero_offset_calibration ros2_upper_body_hardware --arm right --persist\n"
+            f"原始错误: {exc}"
+        ) from exc
+    np = _np
+    mujoco = _mj
 
-from hard_stop_calibration import (
+
+from .hard_stop_calibration import (
     CalibrationHardware,
     HardStopCalibrator,
     HardStopCalibratorConfig,
@@ -48,7 +69,7 @@ from hard_stop_calibration import (
     plan_summary,
     write_zero_offsets_yaml,
 )
-from _paths import default_urdf_path, default_xml_path
+from ._paths import default_urdf_path, default_xml_path
 
 
 def _jnt_name(m: mujoco.MjModel, j: int) -> str:
@@ -718,6 +739,7 @@ def run_calibration(
     torque_search_nm: float = 8.0,
     torque_damping_nm_s: float = 3.0,
 ) -> Dict[str, float]:
+    _lazy_init()
     instrument = detect_instrument_from_xml_path(model_xml)
     # keyboard 虽然可剥离琴体，但实机上电子琴在身前，采用 guitar 的高抬臂轨迹
     _PLAN_INSTRUMENT_MAP = {"keyboard": "guitar"}
@@ -822,6 +844,7 @@ def run_calibration(
 
 
 def main() -> int:
+    _lazy_init()
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
         "--model-xml",

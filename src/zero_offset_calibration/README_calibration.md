@@ -42,6 +42,22 @@ aarch64（目标机，Jetson/Orin）：
 产物分别在 `install_x86/`、`install_aarch64/`，同名 `install/` 符号链接指向
 当前架构版本。
 
+#### 架构差异：MuJoCo 仿真仅限 x86
+
+| 功能 | x86 | aarch64 (Orin) |
+|---|---|---|
+| `hard_stop_calibration`（纯规划） | 可用 | 可用 |
+| `ros2_upper_body_hardware`（真机标定） | 可用 | 可用 |
+| `calibration_web_ui`（Web 控制台） | 可用 | 可用 |
+| `mujoco_hard_stop_calibration`（MuJoCo 仿真） | 可用 | **不可用** |
+
+- `mujoco` 和 `numpy` 仅在 x86 开发机上安装；aarch64 的 Docker 镜像不包含这两个库。
+- `mujoco_hard_stop_calibration.py` 使用**延迟导入**：模块可以被 `colcon build` 正常打包和安装，
+  但在 aarch64 上执行 `ros2 run zero_offset_calibration mujoco_hard_stop_calibration` 时会立刻给出
+  明确的错误提示，并建议使用真机标定入口。
+- 其余入口（`hard_stop_calibration`、`ros2_upper_body_hardware`、`calibration_web_ui`）
+  无 MuJoCo/numpy 依赖，两个架构上均正常工作。
+
 ### 运行入口（ros2 run）
 
 ```bash
@@ -51,7 +67,7 @@ source install/setup.bash   # 或 install_x86/setup.bash / install_aarch64/setup
 ros2 run zero_offset_calibration hard_stop_calibration --arm left --print-plan \
     --urdf $(ros2 pkg prefix zero_offset_calibration)/share/zero_offset_calibration/casbot_band_urdf/urdf/CASBOT02_ENCOS_7dof_shell_20251015_P1L_bass.urdf
 
-# 2) MuJoCo 仿真标定（需 x86 开发机 + mujoco、numpy）
+# 2) MuJoCo 仿真标定（仅 x86；需 mujoco、numpy，aarch64 上不可用）
 ros2 run zero_offset_calibration mujoco_hard_stop_calibration --arm both \
     --out /tmp/zero_offsets_mujoco.yaml
 

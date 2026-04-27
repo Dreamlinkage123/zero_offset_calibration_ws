@@ -535,8 +535,21 @@ def main() -> int:
     args = ap.parse_args()
 
     server = http.server.ThreadingHTTPServer((args.host, args.port), _Handler)
-    url = f"http://localhost:{args.port}"
-    print(f"CASBOT02 硬限位零偏校准 Web 控制台已启动: {url}")
+    if args.host in ("0.0.0.0", ""):
+        import socket as _socket
+        _ip = "0.0.0.0"
+        try:
+            s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            _ip = s.getsockname()[0]
+            s.close()
+        except Exception:
+            pass
+        print(f"CASBOT02 硬限位零偏校准 Web 控制台已启动:")
+        print(f"  本机访问: http://localhost:{args.port}")
+        print(f"  局域网访问: http://{_ip}:{args.port}")
+    else:
+        print(f"CASBOT02 硬限位零偏校准 Web 控制台已启动: http://{args.host}:{args.port}")
     print("按 Ctrl+C 停止")
 
     try:
