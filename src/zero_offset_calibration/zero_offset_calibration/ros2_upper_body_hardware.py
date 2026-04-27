@@ -410,8 +410,9 @@ class UpperBodyDebugHardware:
             "关节 %s 计算零偏 offset=%.6f rad (需写入驱动或从 YAML 应用)" % (joint_name, offset)
         )
 
+    _HLMOTION_OFFSET_PATH = Path("/workspace/hl_motion/hl_config/joint_pos_offset.yaml")
+
     def persist_zero_offsets(self, offsets: Dict[str, float]) -> None:
-        path = self._cfg.offsets_file
         has_left = any(k.startswith("left_") for k in offsets)
         has_right = any(k.startswith("right_") for k in offsets)
         if has_left and has_right:
@@ -420,16 +421,25 @@ class UpperBodyDebugHardware:
             arm = "left"
         else:
             arm = "right"
-        write_joint_pos_offset_yaml(
-            path,
-            offsets,
-            arm,
-            header_lines=(
-                "CASBOT02 upper body — hard-stop zero offsets (radians).",
-                "SetBool /motion/upper_body_debug; cmd /upper_body_debug/joint_cmd.",
-            ),
+        header = (
+            "CASBOT02 upper body — hard-stop zero offsets (radians).",
+            "SetBool /motion/upper_body_debug; cmd /upper_body_debug/joint_cmd.",
         )
+        path = self._cfg.offsets_file
+        write_joint_pos_offset_yaml(path, offsets, arm, header_lines=header)
         self._node.get_logger().info("已写入零偏 YAML: %s" % path)
+        try:
+            write_joint_pos_offset_yaml(
+                self._HLMOTION_OFFSET_PATH, offsets, arm, header_lines=header,
+            )
+            self._node.get_logger().info(
+                "已同步零偏 YAML: %s" % self._HLMOTION_OFFSET_PATH
+            )
+        except OSError as exc:
+            self._node.get_logger().warn(
+                "同步到 %s 失败（权限或路径不存在）: %s"
+                % (self._HLMOTION_OFFSET_PATH, exc)
+            )
 
     def sleep(self, seconds: float) -> None:
         time.sleep(seconds)

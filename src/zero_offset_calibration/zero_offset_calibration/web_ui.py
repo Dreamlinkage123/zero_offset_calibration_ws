@@ -21,9 +21,17 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .hard_stop_calibration import write_joint_pos_offset_yaml
+
 _DEFAULT_PORT = 8088
+
+_OFFSET_PATHS = [
+    Path("src/config/joint_pos_offset.yaml"),
+    Path("/workspace/hl_motion/hl_config/joint_pos_offset.yaml"),
+]
 _MAX_LOG_LINES = 10_000
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -174,6 +182,52 @@ class CalibrationProcess:
                     if rc != 0:
                         self._append(f"进程退出，返回码: {rc}")
 
+    def apply_offset(self) -> Dict[str, Any]:
+        """调用 /motion/set_joint_offset 服务通知 hlmotion 重新加载零偏。"""
+        self._append("[Web] 正在请求 /motion/set_joint_offset ...")
+        try:
+            r = subprocess.run(
+                [
+                    "ros2", "service", "call",
+                    "/motion/set_joint_offset",
+                    "std_srvs/srv/SetBool",
+                    "{data: true}",
+                ],
+                capture_output=True, text=True, timeout=10,
+            )
+            if r.returncode == 0:
+                self._append("[Web] /motion/set_joint_offset 调用成功")
+                return {"ok": True, "message": "零偏已应用"}
+            else:
+                msg = (r.stderr or r.stdout or "").strip()
+                self._append(f"[Web] /motion/set_joint_offset 返回码 {r.returncode}: {msg}")
+                return {"ok": False, "error": f"返回码 {r.returncode}"}
+        except subprocess.TimeoutExpired:
+            self._append("[Web] /motion/set_joint_offset 超时（服务可能不可用）")
+            return {"ok": False, "error": "服务调用超时"}
+        except Exception as exc:
+            self._append(f"[Web] /motion/set_joint_offset 失败: {exc}")
+            return {"ok": False, "error": str(exc)}
+
+    def reset_offsets(self) -> Dict[str, Any]:
+        """将所有零偏 YAML 文件清零。"""
+        self._append("[Web] 正在清零零偏数据...")
+        empty: Dict[str, float] = {}
+        header = ("CASBOT02 upper body — hard-stop zero offsets (radians).",)
+        written: List[str] = []
+        errors: List[str] = []
+        for p in _OFFSET_PATHS:
+            try:
+                write_joint_pos_offset_yaml(p, empty, "both", header_lines=header)
+                written.append(str(p))
+                self._append(f"[Web] 已清零: {p}")
+            except OSError as exc:
+                errors.append(f"{p}: {exc}")
+                self._append(f"[Web] 清零失败: {p} — {exc}")
+        if errors:
+            return {"ok": False, "error": "; ".join(errors), "written": written}
+        return {"ok": True, "message": f"已清零 {len(written)} 个文件"}
+
     def _disable_debug(self) -> None:
         self._append("[Web] 正在关闭上半身调试模式...")
         try:
@@ -241,6 +295,12 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         elif self.path == "/api/cancel":
             threading.Thread(target=_manager.cancel, daemon=True).start()
             self._json({"ok": True, "message": "取消请求已提交"})
+        elif self.path == "/api/apply_offset":
+            result = _manager.apply_offset()
+            self._json(result)
+        elif self.path == "/api/reset_offsets":
+            result = _manager.reset_offsets()
+            self._json(result)
         else:
             self.send_error(404)
 
@@ -339,6 +399,10 @@ select:focus{outline:2px solid var(--accent);outline-offset:-1px}
 .btn-go:hover:not(:disabled){background:var(--accent2)}
 .btn-stop{background:var(--err);color:#fff}
 .btn-stop:hover:not(:disabled){background:#dc2626}
+.btn-apply{background:#8b5cf6;color:#fff}
+.btn-apply:hover:not(:disabled){background:#7c3aed}
+.btn-reset{background:#64748b;color:#fff}
+.btn-reset:hover:not(:disabled){background:#475569}
 
 .status{display:flex;align-items:center;gap:8px;margin-top:14px;padding:10px 12px;
   background:var(--input);border:1px solid var(--border);border-radius:var(--r);font-size:13px}
@@ -413,6 +477,11 @@ select:focus{outline:2px solid var(--accent);outline-offset:-1px}
         <button class="btn btn-stop" id="btn-stop" onclick="doCancel()" disabled>&#10005; 取消</button>
       </div>
 
+      <div class="btns" style="margin-top:8px">
+        <button class="btn btn-apply" id="btn-apply" onclick="doApplyOffset()">&#8635; 应用零偏</button>
+        <button class="btn btn-reset" id="btn-reset" onclick="doResetOffsets()">&#10060; 清零</button>
+      </div>
+
       <div class="status">
         <div class="sd idle" id="sd"></div>
         <span id="st">空闲</span>
@@ -475,6 +544,8 @@ function updUI(s){
   $('st').textContent=stMap[s.status]||s.status;
   $('btn-go').disabled=s.status==='running';
   $('btn-stop').disabled=s.status!=='running';
+  $('btn-apply').disabled=s.status==='running';
+  $('btn-reset').disabled=s.status==='running';
   document.querySelectorAll('.fc').forEach(e=>e.disabled=s.status==='running');
 }
 
@@ -507,6 +578,29 @@ async function doStart(){
 async function doCancel(){
   if(!confirm('确定要取消标定并关闭上半身调试模式？')) return;
   await fetch('/api/cancel',{method:'POST'});
+}
+
+async function doResetOffsets(){
+  if(!confirm('确定要将所有零偏数据清零？')) return;
+  const b=$('btn-reset');
+  b.disabled=true;
+  b.textContent='清零中...';
+  try{
+    const r=await fetch('/api/reset_offsets',{method:'POST'}).then(r=>r.json());
+    if(!r.ok) alert(r.error||'清零失败');
+  }catch(e){alert('请求失败: '+e)}
+  finally{b.disabled=false;b.textContent='\u274C 清零'}
+}
+
+async function doApplyOffset(){
+  const b=$('btn-apply');
+  b.disabled=true;
+  b.textContent='请求中...';
+  try{
+    const r=await fetch('/api/apply_offset',{method:'POST'}).then(r=>r.json());
+    if(!r.ok) alert(r.error||'应用失败');
+  }catch(e){alert('请求失败: '+e)}
+  finally{b.disabled=false;b.textContent='\u21BB 应用零偏'}
 }
 
 function syncHeight(){
