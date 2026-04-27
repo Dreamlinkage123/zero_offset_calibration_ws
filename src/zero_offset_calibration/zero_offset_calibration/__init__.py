@@ -31,6 +31,7 @@ from .hard_stop_calibration import (  # noqa: F401 re-export for convenience
     plan_summary,
     preferred_stop_side,
     search_direction_sign_for_step,
+    write_joint_pos_offset_yaml,
     write_zero_offsets_yaml,
 )
 
@@ -58,5 +59,6 @@ __all__ = [
     "plan_summary",
     "preferred_stop_side",
     "search_direction_sign_for_step",
+    "write_joint_pos_offset_yaml",
     "write_zero_offsets_yaml",
 ]

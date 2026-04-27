@@ -82,6 +82,113 @@ def write_zero_offsets_yaml(
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+# YAML 数组输出时的关节顺序（与用户约定一致，与标定规划顺序无关）
+_LEFT_ARM_YAML_ORDER = (
+    "left_shoulder_pitch_joint",
+    "left_shoulder_roll_joint",
+    "left_shoulder_yaw_joint",
+    "left_elbow_pitch_joint",
+    "left_wrist_pitch_joint",
+    "left_wrist_roll_joint",
+    "left_wrist_yaw_joint",
+)
+_RIGHT_ARM_YAML_ORDER = (
+    "right_shoulder_pitch_joint",
+    "right_shoulder_roll_joint",
+    "right_shoulder_yaw_joint",
+    "right_elbow_pitch_joint",
+    "right_wrist_pitch_joint",
+    "right_wrist_roll_joint",
+    "right_wrist_yaw_joint",
+)
+
+_DEFAULT_JOINT_POS_OFFSET = {
+    "left_leg_pos": [0.0] * 6,
+    "right_leg_pos": [0.0] * 6,
+    "left_arm_pos": [0.0] * 7,
+    "right_arm_pos": [0.0] * 7,
+    "head_pos": [0.0, 0.0],
+    "waist_pos": [0.0],
+}
+
+_YAML_KEY_ORDER = [
+    "left_leg_pos", "right_leg_pos",
+    "left_arm_pos", "right_arm_pos",
+    "head_pos", "waist_pos",
+]
+
+
+def _format_array(arr: List[float]) -> str:
+    """将浮点数组格式化为 YAML 行内数组字符串。"""
+    return "[" + ", ".join(f"{v:.10f}" if v != 0.0 else "0.0" for v in arr) + "]"
+
+
+def _parse_joint_pos_offset_yaml(path: Path) -> Dict[str, List[float]]:
+    """读取已有的 joint_pos_offset YAML，返回各 key 对应的数组。
+
+    不依赖 PyYAML；仅识别本函数写出的固定格式。
+    """
+    data = dict(_DEFAULT_JOINT_POS_OFFSET)
+    if not path.is_file():
+        return {k: list(v) for k, v in data.items()}
+    text = path.read_text(encoding="utf-8")
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or line.startswith("joint_pos_offset"):
+            continue
+        if ":" not in line:
+            continue
+        key, _, val = line.partition(":")
+        key = key.strip()
+        val = val.strip()
+        if key in data and val.startswith("["):
+            val = val.strip("[] ")
+            if val:
+                data[key] = [float(x) for x in val.split(",")]
+    return {k: list(v) for k, v in data.items()}
+
+
+def write_joint_pos_offset_yaml(
+    path: str | Path,
+    offsets: Mapping[str, float],
+    arm: str,
+    *,
+    header_lines: tuple[str, ...] = (
+        "CASBOT02 joint position offset (radians).",
+    ),
+) -> None:
+    """将零偏以 ``joint_pos_offset`` 数组格式写入 YAML（不依赖 PyYAML）。
+
+    只更新 ``arm`` 对应的数组（left/right），保留文件中其余字段不变。
+    ``arm="both"`` 同时更新两臂。
+    """
+    path = Path(path)
+    data = _parse_joint_pos_offset_yaml(path)
+
+    arms_to_update: List[str] = []
+    if arm in ("left", "both"):
+        arms_to_update.append("left")
+    if arm in ("right", "both"):
+        arms_to_update.append("right")
+
+    for side in arms_to_update:
+        order = _LEFT_ARM_YAML_ORDER if side == "left" else _RIGHT_ARM_YAML_ORDER
+        arr = [offsets.get(jn, 0.0) for jn in order]
+        data[f"{side}_arm_pos"] = arr
+
+    lines: List[str] = []
+    for h in header_lines:
+        lines.append("# " + h)
+    if header_lines:
+        lines.append("")
+    lines.append("joint_pos_offset:")
+    for key in _YAML_KEY_ORDER:
+        lines.append(f"    {key}: {_format_array(data[key])}")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 # 规划顺序：从肩到腕，与典型装配/调试顺序一致；每关节一步。
 LEFT_ARM_JOINTS = (
     "left_shoulder_roll_joint",

@@ -67,6 +67,7 @@ from .hard_stop_calibration import (
     detect_instrument_from_xml_path,
     parse_joint_limits,
     plan_summary,
+    write_joint_pos_offset_yaml,
     write_zero_offsets_yaml,
 )
 from ._paths import default_urdf_path, default_xml_path
@@ -820,9 +821,10 @@ def run_calibration(
             all_offsets.update(_calibrate_one_arm(side, viewer, reset_data=(i == 0)))
         if recorder is not None:
             recorder.close()
-        write_zero_offsets_yaml(
+        write_joint_pos_offset_yaml(
             out_yaml,
             all_offsets,
+            arm,
             header_lines=(
                 "MuJoCo hard-stop zero-offset calibration (radians).",
                 "model=%s arm=%s" % (model_xml.name, arm),
@@ -857,7 +859,7 @@ def main() -> int:
         default=default_urdf_path("CASBOT02_ENCOS_7dof_shell_20251015_P1L_bass.urdf"),
     )
     ap.add_argument("--arm", choices=("left", "right", "both"), required=True)
-    ap.add_argument("--out", type=Path, default=Path("zero_offsets_mujoco.yaml"))
+    ap.add_argument("--out", type=Path, default=Path("src/config/joint_pos_offset_mujoco.yaml"))
     ap.add_argument("--print-plan", action="store_true")
     ap.add_argument(
         "--encoder-bias",

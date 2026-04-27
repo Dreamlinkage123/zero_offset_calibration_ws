@@ -130,7 +130,7 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("default_current_threshold", default_value="5.0"),
         DeclareLaunchArgument("encoder_signs", default_value=""),
         DeclareLaunchArgument("current_thresholds", default_value=""),
-        DeclareLaunchArgument("offsets_out", default_value="zero_offsets.yaml"),
+        DeclareLaunchArgument("offsets_out", default_value="src/config/joint_pos_offset.yaml"),
         DeclareLaunchArgument("persist", default_value="false"),
         DeclareLaunchArgument("skip_on_timeout", default_value="false"),
     ]

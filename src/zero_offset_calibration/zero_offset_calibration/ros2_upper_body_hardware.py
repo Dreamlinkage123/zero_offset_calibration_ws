@@ -56,6 +56,7 @@ from .hard_stop_calibration import (
     normalize_plan_instrument,
     parse_joint_limits,
     plan_summary,
+    write_joint_pos_offset_yaml,
     write_zero_offsets_yaml,
 )
 from ._paths import default_urdf_path
@@ -110,7 +111,7 @@ class Ros2UpperBodyConfig:
     # move_stuck_epsilon，视为卡死，立即抛 TimeoutError，而不是傻等到 move_timeout_s。
     move_stuck_window_s: float = 3.0
     move_stuck_epsilon: float = 0.010
-    offsets_file: Path = field(default_factory=lambda: Path("zero_offsets.yaml"))
+    offsets_file: Path = field(default_factory=lambda: Path("src/config/joint_pos_offset.yaml"))
     # 仅力矩+阻尼找限位：UpperJointData 为位置流，用 τ ≈ b·(q̇_ref−q̇) 的等价目标速度 (rad/s) / (N·m)
     torque2vel: float = 0.012
     torque_search_vel_max: float = 0.12
@@ -411,9 +412,18 @@ class UpperBodyDebugHardware:
 
     def persist_zero_offsets(self, offsets: Dict[str, float]) -> None:
         path = self._cfg.offsets_file
-        write_zero_offsets_yaml(
+        has_left = any(k.startswith("left_") for k in offsets)
+        has_right = any(k.startswith("right_") for k in offsets)
+        if has_left and has_right:
+            arm = "both"
+        elif has_left:
+            arm = "left"
+        else:
+            arm = "right"
+        write_joint_pos_offset_yaml(
             path,
             offsets,
+            arm,
             header_lines=(
                 "CASBOT02 upper body — hard-stop zero offsets (radians).",
                 "SetBool /motion/upper_body_debug; cmd /upper_body_debug/joint_cmd.",
@@ -633,7 +643,7 @@ def main() -> int:
         help="腕关节的判停电流阈值 (默认 0.0 即禁用电流判据，仅靠位置+速度+时间判停)",
     )
     p.add_argument("--persist", action="store_true", help="校准后写入 --offsets-out")
-    p.add_argument("--offsets-out", type=Path, default=Path("zero_offsets.yaml"))
+    p.add_argument("--offsets-out", type=Path, default=Path("src/config/joint_pos_offset.yaml"))
     p.add_argument(
         "--search-mode",
         choices=("torque_damping", "velocity"),
