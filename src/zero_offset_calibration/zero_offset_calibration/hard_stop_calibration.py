@@ -456,9 +456,9 @@ class HardStopDetectorConfig:
     """硬限位「堵转」判据：在滑窗内位置几乎不动、速度近零、电流足够、时间够长。"""
 
     min_current_ratio: float = 0.30
-    velocity_epsilon: float = 0.015
-    position_window_epsilon: float = 0.003
-    stall_time_seconds: float = 0.20
+    velocity_epsilon: float = 0.01
+    position_window_epsilon: float = 0.001
+    stall_time_seconds: float = 1.0
     sample_timeout_seconds: float = 10.0
     backoff_seconds: float = 0.20
     # 防止「还没推动关节就被判停」：要求关节自搜索开始起实际移动过 ≥ 该距离（rad）
@@ -469,7 +469,7 @@ class HardStopDetectorConfig:
     # 默认 0.60 rad —— 经过现场标定校准：大于 approach 0.20 rad 的安全余量，
     # 同时容下 wrist 类小电机/有较大机械回差关节的实测停位与 URDF stop_angle 偏差。
     # 设为 <=0 可关闭此检查。
-    max_expected_offset: float = 0.60
+    max_expected_offset: float = 0.03
     # 动态 effort 基线：在搜索前 ``effort_baseline_seconds`` 秒内取 |effort| 最大值
     # 作为「自由运动阶段」基线；判停时要求 |effort| ≥ baseline + ``effort_rise_nm``。
     # 仅在 current_threshold<=0（绝对电流门限禁用）时生效，避免与绝对门限冲突。

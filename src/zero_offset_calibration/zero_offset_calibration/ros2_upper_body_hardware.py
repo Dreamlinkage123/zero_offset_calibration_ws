@@ -688,29 +688,29 @@ def main() -> int:
     )
 
     det_g = p.add_argument_group("判停检测器 (HardStopDetector) — 真机默认比仿真宽松")
-    det_g.add_argument("--velocity-epsilon", type=float, default=0.08,
-                       help="|ω| 低于此视为停住 (rad/s)，默认 0.08（仿真用 0.015）")
-    det_g.add_argument("--position-epsilon", type=float, default=0.012,
-                       help="滑窗内位置峰峰值阈值 (rad)，默认 0.012（仿真用 0.003）")
-    det_g.add_argument("--stall-time", type=float, default=0.50,
-                       help="判停所需滑窗最短持续时间 (s)，默认 0.50（仿真用 0.20）")
+    det_g.add_argument("--velocity-epsilon", type=float, default=0.01,
+                       help="|ω| 低于此视为停住 (rad/s)，默认 0.01")
+    det_g.add_argument("--position-epsilon", type=float, default=0.001,
+                       help="滑窗内位置峰峰值阈值 (rad)，默认 0.001")
+    det_g.add_argument("--stall-time", type=float, default=1.0,
+                       help="判停所需滑窗最短持续时间 (s)，默认 1.0")
     det_g.add_argument("--search-timeout", type=float, default=20.0,
-                       help="单关节搜索超时 (s)，默认 20.0（仿真用 10.0）。"
+                       help="单关节搜索超时 (s)，默认 20.0。"
                             "若启用 --stuck-abort-seconds，通常卡滞会提前触发而非等到此超时")
     det_g.add_argument("--stuck-abort-seconds", type=float, default=4.0,
                        help="卡滞早停：除几何判据外全部满足且离 stop_angle 超标持续该秒数时"
                             "立即终止搜索（默认 4.0，≤0 关闭）")
     det_g.add_argument("--min-current-ratio", type=float, default=0.10,
-                       help="|effort|>=threshold×ratio 视为电流达标，默认 0.10（仿真用 0.30）")
+                       help="|effort|>=threshold×ratio 视为电流达标，默认 0.10")
     det_g.add_argument("--backoff-seconds", type=float, default=0.20,
                        help="检出硬限位后暂停时间 (s)，默认 0.20")
     det_g.add_argument("--min-search-travel", type=float, default=0.08,
                        help="要求关节自搜索开始起实际移动 ≥ 该距离 (rad) 才允许判停，"
-                            "防止在 approach 点直接误判（默认 0.08，仿真/禁用用 0.0）")
-    det_g.add_argument("--max-expected-offset", type=float, default=0.60,
+                            "防止在 approach 点直接误判（默认 0.08，≤0 关闭）")
+    det_g.add_argument("--max-expected-offset", type=float, default=0.03,
                        help="几何合理性门限：判停位置必须在 stop_angle 的 ±该距离 (rad) "
                             "邻域内才接受，避免关节在远离限位处被误判卡停"
-                            "（默认 0.60，对手腕等机械回差较大的关节再调大；≤0 关闭）")
+                            "（默认 0.015；≤0 关闭）")
     det_g.add_argument("--effort-baseline-seconds", type=float, default=0.30,
                        help="动态 effort 基线窗口：搜索前该秒数内取 |effort| 最大值为自由"
                             "运动基线（默认 0.30）")

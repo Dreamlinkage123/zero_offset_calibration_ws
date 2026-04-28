@@ -182,8 +182,8 @@ class CalibrationProcess:
                     if rc != 0:
                         self._append(f"进程退出，返回码: {rc}")
 
-    def apply_offset(self) -> Dict[str, Any]:
-        """调用 /motion/set_joint_offset 服务通知 hlmotion 重新加载零偏。"""
+    def _call_motion_set_joint_offset(self) -> Dict[str, Any]:
+        """调用 /motion/set_joint_offset，通知 hlmotion 重新加载 joint_pos_offset.yaml。"""
         self._append("[Web] 正在请求 /motion/set_joint_offset ...")
         try:
             r = subprocess.run(
@@ -197,11 +197,10 @@ class CalibrationProcess:
             )
             if r.returncode == 0:
                 self._append("[Web] /motion/set_joint_offset 调用成功")
-                return {"ok": True, "message": "零偏已应用"}
-            else:
-                msg = (r.stderr or r.stdout or "").strip()
-                self._append(f"[Web] /motion/set_joint_offset 返回码 {r.returncode}: {msg}")
-                return {"ok": False, "error": f"返回码 {r.returncode}"}
+                return {"ok": True}
+            msg = (r.stderr or r.stdout or "").strip()
+            self._append(f"[Web] /motion/set_joint_offset 返回码 {r.returncode}: {msg}")
+            return {"ok": False, "error": f"返回码 {r.returncode}"}
         except subprocess.TimeoutExpired:
             self._append("[Web] /motion/set_joint_offset 超时（服务可能不可用）")
             return {"ok": False, "error": "服务调用超时"}
@@ -209,8 +208,15 @@ class CalibrationProcess:
             self._append(f"[Web] /motion/set_joint_offset 失败: {exc}")
             return {"ok": False, "error": str(exc)}
 
+    def apply_offset(self) -> Dict[str, Any]:
+        """单独点击「应用零偏」：仅通知 hlmotion 重新加载当前 YAML。"""
+        res = self._call_motion_set_joint_offset()
+        if res.get("ok"):
+            return {"ok": True, "message": "零偏已应用"}
+        return res
+
     def reset_offsets(self) -> Dict[str, Any]:
-        """将所有零偏 YAML 文件清零。"""
+        """将所有零偏 YAML 清零，再调用 /motion/set_joint_offset 让 hlmotion 读最新文件。"""
         self._append("[Web] 正在清零零偏数据...")
         empty: Dict[str, float] = {}
         header = ("CASBOT02 upper body — hard-stop zero offsets (radians).",)
@@ -226,7 +232,22 @@ class CalibrationProcess:
                 self._append(f"[Web] 清零失败: {p} — {exc}")
         if errors:
             return {"ok": False, "error": "; ".join(errors), "written": written}
-        return {"ok": True, "message": f"已清零 {len(written)} 个文件"}
+        svc = self._call_motion_set_joint_offset()
+        n = len(written)
+        if svc.get("ok"):
+            self._append("[Web] 清零完成，hlmotion 已收到重新加载通知")
+            return {
+                "ok": True,
+                "message": f"已清零 {n} 个文件，并已通知 hlmotion 重新加载零偏",
+                "service_ok": True,
+            }
+        err = svc.get("error", "未知错误")
+        self._append("[Web] 清零文件已完成，但 hlmotion 通知失败")
+        return {
+            "ok": True,
+            "message": f"已清零 {n} 个文件；hlmotion 通知失败：{err}",
+            "service_ok": False,
+        }
 
     def _disable_debug(self) -> None:
         self._append("[Web] 正在关闭上半身调试模式...")
@@ -646,6 +667,9 @@ select:focus{outline:2px solid var(--accent);outline-offset:-1px}
       <div class="btns" style="margin-top:8px">
         <button class="btn btn-apply" id="btn-apply" onclick="doApplyOffset()">&#8635; 应用零偏</button>
         <button class="btn btn-reset" id="btn-reset" onclick="doResetOffsets()">&#10060; 清零</button>
+        <p class="hint" style="margin-top:10px;color:var(--dim);font-size:12px;line-height:1.5">
+          清零：先写全 0，再请求 <code>/motion/set_joint_offset</code>；「应用零偏」仅单独请求加载。
+        </p>
       </div>
 
       <div class="status">
@@ -758,13 +782,14 @@ async function doCancel(){
 }
 
 async function doResetOffsets(){
-  if(!confirm('确定要将所有零偏数据清零？')) return;
+  if(!confirm('确定将所有零偏清零？完成后将通知 hlmotion 重新加载 YAML。')) return;
   const b=$('btn-reset');
   b.disabled=true;
   b.textContent='清零中...';
   try{
     const r=await fetch('/api/reset_offsets',{method:'POST'}).then(r=>r.json());
     if(!r.ok) alert(r.error||'清零失败');
+    else if(r.service_ok===false) alert(r.message||'hlmotion 通知失败');
   }catch(e){alert('请求失败: '+e)}
   finally{b.disabled=false;b.textContent='\u274C 清零'}
 }
