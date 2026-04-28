@@ -95,6 +95,12 @@ UPPER_JOINTS_DOC_ORDER: List[str] = [
     "right_pinky_proximal_joint",
 ]
 
+_HAND_KEYWORDS = ("thumb", "index", "middle", "ring", "pinky")
+
+
+def _is_hand_joint(name: str) -> bool:
+    return any(kw in name for kw in _HAND_KEYWORDS)
+
 
 @dataclass
 class Ros2UpperBodyConfig:
@@ -226,6 +232,8 @@ class UpperBodyDebugHardware:
 
     def _ensure_cmd_seed(self) -> None:
         for name in UPPER_JOINTS_DOC_ORDER:
+            if _is_hand_joint(name):
+                continue
             if name in self._state_pos and name not in self._cmd_positions:
                 self._cmd_positions[name] = self._state_pos[name]
 
@@ -233,13 +241,17 @@ class UpperBodyDebugHardware:
         self._ensure_cmd_seed()
         js = JointState()
         for urdf_name in UPPER_JOINTS_DOC_ORDER:
+            ros_name = self._urdf_to_ros.get(urdf_name, urdf_name)
+            if _is_hand_joint(urdf_name):
+                js.name.append(ros_name)
+                js.position.append(0.0)
+                continue
             if urdf_name in self._cmd_positions:
                 pos = self._cmd_positions[urdf_name]
             elif urdf_name in self._state_pos:
                 pos = self._state_pos[urdf_name]
             else:
                 continue
-            ros_name = self._urdf_to_ros.get(urdf_name, urdf_name)
             js.name.append(ros_name)
             js.position.append(pos)
         return js

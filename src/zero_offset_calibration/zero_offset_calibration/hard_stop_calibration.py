@@ -88,18 +88,18 @@ _LEFT_ARM_YAML_ORDER = (
     "left_shoulder_roll_joint",
     "left_shoulder_yaw_joint",
     "left_elbow_pitch_joint",
+    "left_wrist_yaw_joint",
     "left_wrist_pitch_joint",
     "left_wrist_roll_joint",
-    "left_wrist_yaw_joint",
 )
 _RIGHT_ARM_YAML_ORDER = (
     "right_shoulder_pitch_joint",
     "right_shoulder_roll_joint",
     "right_shoulder_yaw_joint",
     "right_elbow_pitch_joint",
+    "right_wrist_yaw_joint",
     "right_wrist_pitch_joint",
     "right_wrist_roll_joint",
-    "right_wrist_yaw_joint",
 )
 
 _DEFAULT_JOINT_POS_OFFSET = {
@@ -960,6 +960,7 @@ class HardStopCalibrator:
         ``skip_on_timeout=True``：超时关节仅打印警告、回退到 hold pose，继续下一个。
         """
         offsets: Dict[str, float] = {}
+        enc_positions: Dict[str, float] = {}
         skipped: List[str] = []
         total_steps = len(plan.steps)
 
@@ -972,6 +973,7 @@ class HardStopCalibrator:
             try:
                 self._run_calibration_step(
                     step, step_idx, total_steps, hardware, offsets, skipped,
+                    enc_positions=enc_positions,
                     skip_on_timeout=skip_on_timeout,
                 )
             except TimeoutError as exc:
@@ -1002,6 +1004,11 @@ class HardStopCalibrator:
 
         if skipped:
             logger.warning("以下关节超时未标定: %s", skipped)
+        if enc_positions:
+            enc_summary = "; ".join(
+                "%s enc=%.4f" % (j, e) for j, e in enc_positions.items()
+            )
+            logger.info("标定结束各关节 enc: %s", enc_summary)
         if persist and offsets:
             hardware.persist_zero_offsets(offsets)
         return offsets
@@ -1015,6 +1022,7 @@ class HardStopCalibrator:
         offsets: Dict[str, float],
         skipped: List[str],
         *,
+        enc_positions: Optional[Dict[str, float]] = None,
         skip_on_timeout: bool,
     ) -> None:
         """执行单个关节的「到位 → 搜索 → 判停 → 回退」子流程。
@@ -1090,6 +1098,8 @@ class HardStopCalibrator:
                     reference_angle=step.stop_angle,
                 )
                 offsets[jn] = offset
+                if enc_positions is not None:
+                    enc_positions[jn] = sample.encoder_position
                 hardware.apply_zero_offset(jn, offset)
                 logger.info(
                     "[%d/%d] %s 检出硬限位: enc=%.4f → offset=%.6f rad",
