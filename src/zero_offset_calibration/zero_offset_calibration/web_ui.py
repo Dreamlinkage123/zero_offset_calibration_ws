@@ -667,9 +667,6 @@ select:focus{outline:2px solid var(--accent);outline-offset:-1px}
       <div class="btns" style="margin-top:8px">
         <button class="btn btn-apply" id="btn-apply" onclick="doApplyOffset()">&#8635; 应用零偏</button>
         <button class="btn btn-reset" id="btn-reset" onclick="doResetOffsets()">&#10060; 清零</button>
-        <p class="hint" style="margin-top:10px;color:var(--dim);font-size:12px;line-height:1.5">
-          清零：先写全 0，再请求 <code>/motion/set_joint_offset</code>；「应用零偏」仅单独请求加载。
-        </p>
       </div>
 
       <div class="status">
