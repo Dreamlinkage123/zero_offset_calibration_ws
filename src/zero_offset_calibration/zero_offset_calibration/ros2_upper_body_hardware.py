@@ -688,8 +688,8 @@ def main() -> int:
     )
 
     det_g = p.add_argument_group("判停检测器 (HardStopDetector) — 真机默认比仿真宽松")
-    det_g.add_argument("--velocity-epsilon", type=float, default=0.01,
-                       help="|ω| 低于此视为停住 (rad/s)，默认 0.01")
+    det_g.add_argument("--velocity-epsilon", type=float, default=0.015,
+                       help="|ω| 低于此视为停住 (rad/s)，默认 0.015")
     det_g.add_argument("--position-epsilon", type=float, default=0.001,
                        help="滑窗内位置峰峰值阈值 (rad)，默认 0.001")
     det_g.add_argument("--stall-time", type=float, default=1.0,
@@ -700,17 +700,18 @@ def main() -> int:
     det_g.add_argument("--stuck-abort-seconds", type=float, default=4.0,
                        help="卡滞早停：除几何判据外全部满足且离 stop_angle 超标持续该秒数时"
                             "立即终止搜索（默认 4.0，≤0 关闭）")
-    det_g.add_argument("--min-current-ratio", type=float, default=0.10,
-                       help="|effort|>=threshold×ratio 视为电流达标，默认 0.10")
+    det_g.add_argument("--min-current-ratio", type=float, default=0.06,
+                       help="|effort|>=threshold×ratio 视为电流达标；默认 0.06，"
+                            "与 --default-current-threshold 5.0 配合时等价于 |eff|≥0.30")
     det_g.add_argument("--backoff-seconds", type=float, default=0.20,
                        help="检出硬限位后暂停时间 (s)，默认 0.20")
     det_g.add_argument("--min-search-travel", type=float, default=0.08,
                        help="要求关节自搜索开始起实际移动 ≥ 该距离 (rad) 才允许判停，"
                             "防止在 approach 点直接误判（默认 0.08，≤0 关闭）")
-    det_g.add_argument("--max-expected-offset", type=float, default=0.03,
+    det_g.add_argument("--max-expected-offset", type=float, default=0.036,
                        help="几何合理性门限：判停位置必须在 stop_angle 的 ±该距离 (rad) "
                             "邻域内才接受，避免关节在远离限位处被误判卡停"
-                            "（默认 0.015；≤0 关闭）")
+                            "（默认 0.036；≤0 关闭）")
     det_g.add_argument("--effort-baseline-seconds", type=float, default=0.30,
                        help="动态 effort 基线窗口：搜索前该秒数内取 |effort| 最大值为自由"
                             "运动基线（默认 0.30）")

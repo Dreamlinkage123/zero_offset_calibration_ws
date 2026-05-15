@@ -455,8 +455,9 @@ class JointSample:
 class HardStopDetectorConfig:
     """硬限位「堵转」判据：在滑窗内位置几乎不动、速度近零、电流足够、时间够长。"""
 
-    min_current_ratio: float = 0.30
-    velocity_epsilon: float = 0.01
+    # |eff| 达标：>= joint_current_threshold × min_current_ratio（默认阈值 5.0×0.06=0.30）
+    min_current_ratio: float = 0.06
+    velocity_epsilon: float = 0.015
     position_window_epsilon: float = 0.001
     stall_time_seconds: float = 1.0
     sample_timeout_seconds: float = 10.0
@@ -465,11 +466,8 @@ class HardStopDetectorConfig:
     # 默认 0.08 rad，明显小于 approach_angle→stop_angle 的 0.20 rad 裕度。
     min_search_travel: float = 0.08
     # 几何合理性：判停位置必须落在 stop_angle 的 ±该距离 邻域内才接受，避免关节
-    # 在远离限位的位置因摩擦/卡滞被误判。
-    # 默认 0.60 rad —— 经过现场标定校准：大于 approach 0.20 rad 的安全余量，
-    # 同时容下 wrist 类小电机/有较大机械回差关节的实测停位与 URDF stop_angle 偏差。
-    # 设为 <=0 可关闭此检查。
-    max_expected_offset: float = 0.03
+    # 在远离限位的位置因摩擦/卡滞被误判。默认 0.036 rad；设为 <=0 可关闭。
+    max_expected_offset: float = 0.036
     # 动态 effort 基线：在搜索前 ``effort_baseline_seconds`` 秒内取 |effort| 最大值
     # 作为「自由运动阶段」基线；判停时要求 |effort| ≥ baseline + ``effort_rise_nm``。
     # 仅在 current_threshold<=0（绝对电流门限禁用）时生效，避免与绝对门限冲突。
